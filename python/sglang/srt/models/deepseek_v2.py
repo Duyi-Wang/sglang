@@ -143,7 +143,7 @@ def mori_op_init(dtype, rankID, world_size, hdim, E, topk):
         rank=rankID,
         world_size=world_size,
         hidden_dim=hdim,
-        max_num_inp_token_per_rank=128,
+        max_num_inp_token_per_rank=1024,
         num_experts_per_rank=E // world_size,
         num_experts_per_token=topk,
     )
@@ -403,9 +403,10 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states
 
-    def forward_deepep(
+    def forward_aiterep(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
+        token_num = hidden_states.shape[0]
         forward_mode = forward_batch.forward_mode
         shared_output = None
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
@@ -440,7 +441,7 @@ class DeepseekV2MoE(nn.Module):
             hidden_states, dispatch_weights, dispatch_ids, dispatch_recv_token_num = (
                 self.mori_op.dispatch(hidden_states, topk_weights, topk_idx)
             )
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
         else:
             dispatch_weights = topk_weights
             dispatch_ids = topk_idx
@@ -459,10 +460,11 @@ class DeepseekV2MoE(nn.Module):
                 topk_weights,
                 topk_idx,
             )
+            final_hidden_states = final_hidden_states[:token_num]
 
         if shared_output is not None:
             x = shared_output
-            x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+            x.add_(final_hidden_states)
             final_hidden_states = x
         else:
             final_hidden_states *= self.routed_scaling_factor
