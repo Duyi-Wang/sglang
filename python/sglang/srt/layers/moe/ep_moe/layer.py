@@ -53,6 +53,7 @@ from sglang.srt.utils import (
 
 _is_hip = is_hip()
 _is_fp8_fnuz = is_fp8_fnuz()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_hip:
     from vllm._custom_ops import scaled_fp8_quant
@@ -1294,7 +1295,10 @@ class DeepEPMoE(EPMoE):
 
 def get_moe_impl_class():
     if global_server_args_dict["enable_deepep_moe"]:
-        return DeepEPMoE
+        if _use_aiter:
+            return EPMoE
+        else:
+            return DeepEPMoE
     if global_server_args_dict["enable_ep_moe"]:
         return EPMoE
     return FusedMoE

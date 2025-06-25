@@ -126,8 +126,29 @@ if _is_hip:
 
 if _use_aiter:
     from aiter.rotary_embedding import get_rope
+    import mori
+    from functools import lru_cache
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=2)
+def mori_op_init(dtype, rankID, world_size, hdim, E, topk):
+    world_group = parallel_state.get_world_group().cpu_group
+    assert world_group is not None
+    torch._C._distributed_c10d._register_process_group("mori", world_group)
+    mori.shmem.shmem_torch_process_group_init("mori")
+    mori_config = mori.ops.EpDispatchCombineConfig(
+        data_type=dtype,
+        rank=rankID,
+        world_size=world_size,
+        hidden_dim=hdim,
+        max_num_inp_token_per_rank=128,
+        num_experts_per_rank=E // world_size,
+        num_experts_per_token=topk,
+    )
+    mori_op = mori.ops.EpDispatchCombineOp(mori_config)
+    return mori_op
 
 
 class AttnForwardMethod(IntEnum):
@@ -272,7 +293,7 @@ class DeepseekV2MoE(nn.Module):
             prefix=add_prefix("experts", prefix),
             **(
                 dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
-                if global_server_args_dict["enable_deepep_moe"]
+                if global_server_args_dict["enable_deepep_moe"] and not _use_aiter
                 else {}
             ),
         )
@@ -312,18 +333,41 @@ class DeepseekV2MoE(nn.Module):
                 else None
             )
 
-            self.deepep_dispatcher = MaybeTboDeepEPDispatcher(
-                group=parallel_state.get_tp_group().device_group,
-                router_topk=self.top_k,
-                permute_fusion=True,
-                num_experts=self.num_experts,
-                num_local_experts=config.n_routed_experts // self.tp_size,
-                hidden_size=config.hidden_size,
-                params_dtype=config.torch_dtype,
-                deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
-                async_finish=True,
-                return_recv_hook=True,
-            )
+            if _use_aiter:
+                rankID = parallel_state.get_tp_group().rank
+                self.mori_op = mori_op_init(
+                    config.torch_dtype,
+                    rankID,
+                    self.ep_size,
+                    config.hidden_size,
+                    config.n_routed_experts,
+                    self.top_k,
+                )
+                self.expert_mask = torch.zeros(
+                    (config.n_routed_experts,),
+                    dtype=torch.int32,
+                    device=parallel_state.get_tp_group().device,
+                )
+                self.expert_mask[
+                    config.n_routed_experts
+                    // self.ep_size
+                    * rankID : config.n_routed_experts
+                    // self.ep_size
+                    * (rankID + 1)
+                ] = 1
+            else:
+                self.deepep_dispatcher = MaybeTboDeepEPDispatcher(
+                    group=parallel_state.get_tp_group().device_group,
+                    router_topk=self.top_k,
+                    permute_fusion=True,
+                    num_experts=self.num_experts,
+                    num_local_experts=config.n_routed_experts // self.tp_size,
+                    hidden_size=config.hidden_size,
+                    params_dtype=config.torch_dtype,
+                    deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
+                    async_finish=True,
+                    return_recv_hook=True,
+                )
 
         self._enable_deepep_moe = global_server_args_dict["enable_deepep_moe"]
 
@@ -340,6 +384,8 @@ class DeepseekV2MoE(nn.Module):
         if not self._enable_deepep_moe:
             return self.forward_normal(hidden_states)
         else:
+            if _use_aiter:
+                return self.forward_aiterep(hidden_states, forward_batch)
             return self.forward_deepep(hidden_states, forward_batch)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -355,6 +401,72 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        return final_hidden_states
+
+    def forward_deepep(
+        self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
+    ) -> torch.Tensor:
+        forward_mode = forward_batch.forward_mode
+        shared_output = None
+        if is_non_idle_and_non_empty(forward_mode, hidden_states):
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.gate(hidden_states)
+            shared_output = self._forward_shared_experts(hidden_states)
+            topk_weights, topk_idx = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=True,
+                renormalize=self.renormalize,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                correction_bias=self.correction_bias,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_token_non_padded=forward_batch.num_token_non_padded,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
+            )
+        else:
+            topk_idx = torch.full(
+                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+            )
+            topk_weights = torch.empty(
+                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+            )
+        if self.ep_size > 1:
+            topk_idx = topk_idx.to(torch.uint32)
+            hidden_states, dispatch_weights, dispatch_ids, dispatch_recv_token_num = (
+                self.mori_op.dispatch(hidden_states, topk_weights, topk_idx)
+            )
+            torch.cuda.synchronize()
+        else:
+            dispatch_weights = topk_weights
+            dispatch_ids = topk_idx
+        final_hidden_states = self.experts.quant_method.maybe_apply_hip_fused_experts(
+            self.experts,
+            hidden_states,
+            dispatch_weights,
+            dispatch_ids.to(torch.int32),
+            activation="silu",
+            expert_mask=self.expert_mask,
+            num_local_tokens=dispatch_recv_token_num.to(torch.int32),
+        )
+        if self.ep_size > 1:
+            final_hidden_states = self.mori_op.combine(
+                final_hidden_states,
+                topk_weights,
+                topk_idx,
+            )
+
+        if shared_output is not None:
+            x = shared_output
+            x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+            final_hidden_states = x
+        else:
+            final_hidden_states *= self.routed_scaling_factor
+
         return final_hidden_states
 
     def forward_deepep(

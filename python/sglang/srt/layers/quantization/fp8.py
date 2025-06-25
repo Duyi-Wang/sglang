@@ -1048,6 +1048,8 @@ class Fp8MoEMethod:
         topk_ids: torch.Tensor,
         activation: str = "silu",
         no_combine: bool = False,
+        expert_mask: Optional[torch.Tensor] = None,
+        num_local_tokens: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if _use_hip_int4:
             # TODO: add triton kernel and add check _use_aiter
@@ -1083,7 +1085,8 @@ class Fp8MoEMethod:
                         if activation == "silu"
                         else ActivationType.Gelu
                     ),
-                    expert_mask=None,
+                    expert_mask=expert_mask,
+                    num_local_tokens=num_local_tokens,
                 )
             else:
                 return ck_moe_2stages(
