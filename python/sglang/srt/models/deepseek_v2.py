@@ -128,22 +128,27 @@ if _use_aiter:
     from aiter.rotary_embedding import get_rope
     import mori
     from functools import lru_cache
+    from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype
+    from aiter import get_hip_quant, QuantType
 
 logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=2)
-def mori_op_init(dtype, rankID, world_size, hdim, E, topk):
+def mori_op_init(quant_dtype, dtype, rankID, world_size, hdim, E, topk):
     world_group = parallel_state.get_world_group().cpu_group
     assert world_group is not None
     torch._C._distributed_c10d._register_process_group("mori", world_group)
     mori.shmem.shmem_torch_process_group_init("mori")
     mori_config = mori.ops.EpDispatchCombineConfig(
-        data_type=dtype,
+        data_type=quant_dtype,
         rank=rankID,
         world_size=world_size,
         hidden_dim=hdim,
-        max_num_inp_token_per_rank=1024,
+        scale_dim=hdim // 128,
+        scale_type_size=torch.float32.itemsize,
+        max_token_type_size=dtype.itemsize,
+        max_num_inp_token_per_rank=2 * 8192 * 1024 // dtype.itemsize // hdim * 2,
         num_experts_per_rank=E // world_size,
         num_experts_per_token=topk,
     )
@@ -336,6 +341,7 @@ class DeepseekV2MoE(nn.Module):
             if _use_aiter:
                 rankID = parallel_state.get_tp_group().rank
                 self.mori_op = mori_op_init(
+                    fp8_dtype,
                     config.torch_dtype,
                     rankID,
                     self.ep_size,
@@ -407,6 +413,7 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         token_num = hidden_states.shape[0]
+        dtype = hidden_states.dtype
         forward_mode = forward_batch.forward_mode
         shared_output = None
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
@@ -437,11 +444,22 @@ class DeepseekV2MoE(nn.Module):
                 (0, self.top_k), dtype=torch.float32, device=hidden_states.device
             )
         if self.ep_size > 1:
-            topk_idx = topk_idx.to(torch.uint32)
-            hidden_states, dispatch_weights, dispatch_ids, dispatch_recv_token_num = (
-                self.mori_op.dispatch(hidden_states, topk_weights, topk_idx)
+            quant_func = get_hip_quant(QuantType.per_1x128)
+            hidden_states, scale = quant_func(hidden_states, quant_dtype=fp8_dtype)
+            # if token_num > 0:
+            #     hidden_states, scale = quant_func(hidden_states, quant_dtype=fp8_dtype)
+            # else:
+            #     # hidden_states = torch.empty_like(hidden_states, dtype=fp8_dtype, device=hidden_states.device)
+            #     hidden_states = None
+            #     scale = None
+            hidden_states, dispatch_weights, dispatch_scale, dispatch_ids, dispatch_recv_token_num = (
+                self.mori_op.dispatch(hidden_states, topk_weights, scale, topk_idx)
             )
-            # torch.cuda.synchronize()
+            # if self.layer_id ==5:
+            #     torch.cuda.synchronize()
+            #     src_token_pos = self.mori_op.get_dispatch_src_token_pos().cpu()
+            #     src_token_num = src_token_pos.shape[0]
+            #     print(f"rank={parallel_state.get_tp_group().rank}, {dispatch_recv_token_num=} {token_num=} {topk_idx=} {dispatch_ids[: src_token_num]}")
         else:
             dispatch_weights = topk_weights
             dispatch_ids = topk_idx
@@ -449,10 +467,12 @@ class DeepseekV2MoE(nn.Module):
             self.experts,
             hidden_states,
             dispatch_weights,
-            dispatch_ids.to(torch.int32),
+            dispatch_ids,
             activation="silu",
             expert_mask=self.expert_mask,
-            num_local_tokens=dispatch_recv_token_num.to(torch.int32),
+            num_local_tokens=dispatch_recv_token_num,
+            scale=dispatch_scale,
+            dtype=dtype,
         )
         if self.ep_size > 1:
             final_hidden_states = self.mori_op.combine(
@@ -1612,10 +1632,15 @@ class DeepseekV2DecoderLayer(nn.Module):
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
+        # if self.layer_id ==3:
+        #     print(f"brefore prepare_mlp rank={parallel_state.get_tp_group().rank}, {hidden_states.shape=}")
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
+
+        if self.layer_id ==3:
+            print(f"after prepare_mlp rank={parallel_state.get_tp_group().rank}, {hidden_states.shape=}")
 
         hidden_states = self.mlp(hidden_states, forward_batch)
 

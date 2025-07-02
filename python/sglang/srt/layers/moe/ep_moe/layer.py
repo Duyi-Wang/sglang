@@ -919,6 +919,8 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
         no_combine: bool = False,
         expert_mask: Optional[torch.Tensor] = None,
         num_local_tokens: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        dtype=None,
     ) -> Optional[torch.Tensor]:
         return Fp8MoEMethod.maybe_apply_hip_fused_experts(
             self,
@@ -930,6 +932,8 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
             no_combine,
             expert_mask,
             num_local_tokens,
+            scale,
+            dtype=dtype,
         )
 
 

@@ -1050,6 +1050,8 @@ class Fp8MoEMethod:
         no_combine: bool = False,
         expert_mask: Optional[torch.Tensor] = None,
         num_local_tokens: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        dtype=None,
     ) -> Optional[torch.Tensor]:
         if _use_hip_int4:
             # TODO: add triton kernel and add check _use_aiter
@@ -1087,6 +1089,8 @@ class Fp8MoEMethod:
                     ),
                     expert_mask=expert_mask,
                     num_local_tokens=num_local_tokens,
+                    a1_scale=scale,
+                    dtype=dtype,
                 )
             else:
                 return ck_moe_2stages(
