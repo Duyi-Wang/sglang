@@ -446,20 +446,13 @@ class DeepseekV2MoE(nn.Module):
         if self.ep_size > 1:
             quant_func = get_hip_quant(QuantType.per_1x128)
             hidden_states, scale = quant_func(hidden_states, quant_dtype=fp8_dtype)
-            # if token_num > 0:
-            #     hidden_states, scale = quant_func(hidden_states, quant_dtype=fp8_dtype)
-            # else:
-            #     # hidden_states = torch.empty_like(hidden_states, dtype=fp8_dtype, device=hidden_states.device)
-            #     hidden_states = None
-            #     scale = None
-            hidden_states, dispatch_weights, dispatch_scale, dispatch_ids, dispatch_recv_token_num = (
-                self.mori_op.dispatch(hidden_states, topk_weights, scale, topk_idx)
-            )
-            # if self.layer_id ==5:
-            #     torch.cuda.synchronize()
-            #     src_token_pos = self.mori_op.get_dispatch_src_token_pos().cpu()
-            #     src_token_num = src_token_pos.shape[0]
-            #     print(f"rank={parallel_state.get_tp_group().rank}, {dispatch_recv_token_num=} {token_num=} {topk_idx=} {dispatch_ids[: src_token_num]}")
+            (
+                hidden_states,
+                dispatch_weights,
+                dispatch_scale,
+                dispatch_ids,
+                dispatch_recv_token_num,
+            ) = self.mori_op.dispatch(hidden_states, topk_weights, scale, topk_idx)
         else:
             dispatch_weights = topk_weights
             dispatch_ids = topk_idx
@@ -1632,15 +1625,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
-        # if self.layer_id ==3:
-        #     print(f"brefore prepare_mlp rank={parallel_state.get_tp_group().rank}, {hidden_states.shape=}")
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-
-        if self.layer_id ==3:
-            print(f"after prepare_mlp rank={parallel_state.get_tp_group().rank}, {hidden_states.shape=}")
 
         hidden_states = self.mlp(hidden_states, forward_batch)
 
