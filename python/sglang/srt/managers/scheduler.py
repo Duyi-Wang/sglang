@@ -1800,11 +1800,15 @@ class Scheduler(
                 )
                 if self.pp_group.is_last_rank:
                     logits_output, next_token_ids, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, profile=self.torch_profiler
+                        )
                     )
                 else:
                     pp_hidden_states_proxy_tensors, _, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, profile=self.torch_profiler
+                        )
                     )
                 bid = model_worker_batch.bid
             else:

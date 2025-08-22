@@ -103,6 +103,7 @@ class SchedulerProfilerMixin:
         )
 
         activities = self.profiler_activities
+        activities = ["CPU", "GPU"]
         with_stack = self.torch_profiler_with_stack
         record_shapes = self.torch_profiler_record_shapes
 
@@ -144,8 +145,15 @@ class SchedulerProfilerMixin:
             self.rpd_profiler.rangePush("", "rpd profile range", "")
             self.profile_in_progress = True
         elif torchprof_activities:
+            wait = int(os.getenv("PROFILE_WAIT", 1))
+            warmup = int(os.getenv("PROFILE_WARMUP", 1))
+            active = int(os.getenv("PROFILE_ACTIVATE", 1))
+            schedule = torch.profiler.schedule(
+                wait=wait, warmup=warmup, active=active, repeat=1
+            )
             self.torch_profiler = torch.profiler.profile(
                 activities=torchprof_activities,
+                schedule=schedule,
                 with_stack=with_stack if with_stack is not None else True,
                 record_shapes=record_shapes if record_shapes is not None else False,
                 on_trace_ready=(

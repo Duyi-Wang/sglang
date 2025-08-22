@@ -150,7 +150,9 @@ class TpModelWorkerClient:
         batch_lists = [None] * 2
 
         while True:
-            model_worker_batch, future_token_ids_ct, sync_event = self.input_queue.get()
+            model_worker_batch, future_token_ids_ct, sync_event, profile = (
+                self.input_queue.get()
+            )
             if not model_worker_batch:
                 break
 
@@ -204,6 +206,9 @@ class TpModelWorkerClient:
             self.output_queue.put(
                 (copy_done, logits_output, next_token_ids, can_run_cuda_graph)
             )
+            # set profile step
+            if profile:
+                profile.step()
 
     def resolve_last_batch_result(self, launch_done: Optional[threading.Event] = None):
         """
@@ -230,7 +235,9 @@ class TpModelWorkerClient:
         return logits_output, next_token_ids, can_run_cuda_graph
 
     def forward_batch_generation(
-        self, model_worker_batch: ModelWorkerBatch
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        profile: torch.profiler.profile = None,
     ) -> Tuple[None, torch.Tensor, bool]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
@@ -246,7 +253,9 @@ class TpModelWorkerClient:
         sync_event.record(self.scheduler_stream)
 
         # Push a new batch to the queue
-        self.input_queue.put((model_worker_batch, self.future_token_ids_ct, sync_event))
+        self.input_queue.put(
+            (model_worker_batch, self.future_token_ids_ct, sync_event, profile)
+        )
 
         # Allocate output future objects
         bs = len(model_worker_batch.seq_lens)
