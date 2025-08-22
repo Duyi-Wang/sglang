@@ -389,10 +389,10 @@ class ServerArgs:
         # DeepEP MoE
         self.enable_sp_layernorm = False
         if self.enable_deepep_moe:
-            if self.deepep_mode == "auto":
-                assert (
-                    not self.enable_dp_attention
-                ), "DeepEP MoE `auto` mode is not supported with DP Attention."
+            # if self.deepep_mode == "auto":
+            #     assert (
+            #         not self.enable_dp_attention
+            #     ), "DeepEP MoE `auto` mode is not supported with DP Attention."
             if self.deepep_mode == "normal":
                 logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
                 self.disable_cuda_graph = True

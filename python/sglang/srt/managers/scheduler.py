@@ -1666,11 +1666,15 @@ class Scheduler(
                 )
                 if self.pp_group.is_last_rank:
                     logits_output, next_token_ids, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, profile=self.torch_profiler
+                        )
                     )
                 else:
                     pp_hidden_states_proxy_tensors, _, can_run_cuda_graph = (
-                        self.tp_worker.forward_batch_generation(model_worker_batch)
+                        self.tp_worker.forward_batch_generation(
+                            model_worker_batch, profile=self.torch_profiler
+                        )
                     )
                 bid = model_worker_batch.bid
             else:
@@ -2339,6 +2343,7 @@ class Scheduler(
             "CPU": torch.profiler.ProfilerActivity.CPU,
             "GPU": torch.profiler.ProfilerActivity.CUDA,
         }
+        activities = ["CPU", "GPU"]
         torchprof_activities = [
             activity_map[a] for a in activities if a in activity_map
         ]
@@ -2373,8 +2378,15 @@ class Scheduler(
             self.rpd_profiler.rangePush("", "rpd profile range", "")
             self.profile_in_progress = True
         elif torchprof_activities:
+            wait = int(os.getenv("PROFILE_WAIT", 1))
+            warmup = int(os.getenv("PROFILE_WARMUP", 1))
+            active = int(os.getenv("PROFILE_ACTIVATE", 1))
+            schedule = torch.profiler.schedule(
+                wait=wait, warmup=warmup, active=active, repeat=1
+            )
             self.torch_profiler = torch.profiler.profile(
                 activities=torchprof_activities,
+                schedule=schedule,
                 with_stack=with_stack if with_stack is not None else True,
                 record_shapes=record_shapes if record_shapes is not None else False,
             )
