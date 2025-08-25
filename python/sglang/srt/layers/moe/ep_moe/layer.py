@@ -53,9 +53,13 @@ from sglang.srt.utils import (
 
 _is_hip = is_hip()
 _is_fp8_fnuz = is_fp8_fnuz()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_hip:
     from vllm._custom_ops import scaled_fp8_quant
+
+if _use_aiter:
+    from aiter.ops.shuffle import shuffle_weight
 
 logger = logging.getLogger(__name__)
 
@@ -830,6 +834,14 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
                 )
             layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            if _use_aiter:
+                # Pre-shuffle weights
+                layer.w13_weight.data = shuffle_weight(
+                    layer.w13_weight.contiguous(), (16, 16)
+                )
+                layer.w2_weight.data = shuffle_weight(
+                    layer.w2_weight.contiguous(), (16, 16)
+                )
             return
 
         # If checkpoint is fp8, we need to handle that the
@@ -873,6 +885,14 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
                         w2_weight_scale, requires_grad=False
                     )
                     layer.w2_input_scale = None
+            if _use_aiter:
+                # Pre-shuffle weights
+                layer.w13_weight.data = shuffle_weight(
+                    layer.w13_weight.contiguous(), (16, 16)
+                )
+                layer.w2_weight.data = shuffle_weight(
+                    layer.w2_weight.contiguous(), (16, 16)
+                )
             return
 
     def apply(
@@ -888,6 +908,33 @@ class Fp8EPMoEMethod(Fp8MoEMethod):
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def maybe_apply_hip_fused_experts(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str = "silu",
+        no_combine: bool = False,
+        expert_mask: Optional[torch.Tensor] = None,
+        num_local_tokens: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        dtype=None,
+    ) -> Optional[torch.Tensor]:
+        return Fp8MoEMethod.maybe_apply_hip_fused_experts(
+            self,
+            layer,
+            x,
+            topk_weights,
+            topk_ids,
+            activation,
+            no_combine,
+            expert_mask,
+            num_local_tokens,
+            scale,
+            dtype=dtype,
+        )
 
 
 class DeepEPMoE(EPMoE):
@@ -1294,7 +1341,10 @@ class DeepEPMoE(EPMoE):
 
 def get_moe_impl_class():
     if global_server_args_dict["enable_deepep_moe"]:
-        return DeepEPMoE
+        if _use_aiter:
+            return EPMoE
+        else:
+            return DeepEPMoE
     if global_server_args_dict["enable_ep_moe"]:
         return EPMoE
     return FusedMoE
