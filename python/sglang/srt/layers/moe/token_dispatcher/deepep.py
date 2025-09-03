@@ -49,6 +49,79 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
 
+# Global flag to track if MORI process group has been registered
+_mori_process_group_registered = False
+
+# Global MORI operation instance
+_mori_op = None
+
+if _use_aiter:
+    import mori
+    from aiter import QuantType, get_hip_quant
+
+    from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype
+
+    def init_mori_op(
+        world_group, quant_dtype, dtype, rankID, world_size, hdim, E, topk
+    ):
+        """Initialize the global MORI operation instance."""
+        assert world_group is not None
+
+        global _mori_process_group_registered
+        if not _mori_process_group_registered:
+            try:
+                torch._C._distributed_c10d._register_process_group("mori", world_group)
+                _mori_process_group_registered = True
+            except RuntimeError as e:
+                if "already registered" in str(e):
+                    _mori_process_group_registered = True
+                else:
+                    raise e
+
+        mori.shmem.shmem_torch_process_group_init("mori")
+        mori_config = mori.ops.EpDispatchCombineConfig(
+            data_type=quant_dtype,
+            rank=rankID,
+            world_size=world_size,
+            hidden_dim=hdim,
+            scale_dim=hdim // 128,
+            scale_type_size=torch.float32.itemsize,
+            max_token_type_size=dtype.itemsize,
+            max_num_inp_token_per_rank=2 * 8192 * 1024 // dtype.itemsize // hdim * 2,
+            num_experts_per_rank=E // world_size,
+            num_experts_per_token=topk,
+        )
+        return mori.ops.EpDispatchCombineOp(mori_config)
+
+    def get_mori_op(
+        world_group: torch.distributed.ProcessGroup,
+        quant_dtype,
+        dtype,
+        rankID: int,
+        world_size: int,
+        hdim: int,
+        E: int,
+        topk: int,
+    ):
+        """Get or create a global MORI operation instance."""
+        global _mori_op
+
+        if _mori_op is None:
+            _mori_op = init_mori_op(
+                world_group, quant_dtype, dtype, rankID, world_size, hdim, E, topk
+            )
+
+        return _mori_op
+
+else:
+
+    def get_mori_op(*args, **kwargs):
+        """Return None when aiter is not available."""
+        return None
+
+
+import logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,9 +167,24 @@ class AscendDeepEPLLOutput(NamedTuple):
         return DispatchOutputFormat.ASCENT_LL
 
 
+class MORIOutput(NamedTuple):
+    """MORI-EP dispatch output."""
+
+    hidden_states: torch.Tensor
+    topk_idx: torch.Tensor
+    topk_weights: torch.Tensor
+    topk_scale: torch.Tensor
+    num_recv_tokens: torch.Tensor
+
+    @property
+    def format(self) -> DispatchOutputFormat:
+        return DispatchOutputFormat.MORI
+
+
 assert isinstance(DeepEPNormalOutput, DispatchOutput)
 assert isinstance(DeepEPLLOutput, DispatchOutput)
 assert isinstance(AscendDeepEPLLOutput, DispatchOutput)
+assert isinstance(MORIOutput, DispatchOutput)
 
 
 class DeepEPDispatchMode(IntEnum):
@@ -727,3 +815,59 @@ class DeepEPDispatcher(BaseDispatcher):
     def _update_stage(self, old_stage, new_stage):
         assert self._stage == old_stage
         self._stage = new_stage
+
+
+class MORIDispatcher(BaseDispatcher):
+    def __init__(
+        self,
+        world_group: torch.distributed.ProcessGroup,
+        rank: int = None,
+        ep_size: int = None,
+        num_experts: int = None,
+        router_topk: int = None,
+        hidden_size: int = None,
+        params_dtype: torch.dtype = None,
+    ):
+        self.mori_op = get_mori_op(
+            world_group=world_group,
+            quant_dtype=fp8_dtype if _use_aiter else None,
+            dtype=params_dtype,
+            rankID=rank,
+            world_size=ep_size,
+            hdim=hidden_size,
+            E=num_experts,
+            topk=router_topk,
+        )
+
+        if self.mori_op is None:
+            raise RuntimeError("MORI-EP requires aiter, but it's not available.")
+
+    def dispatch(self, *args, **kwargs) -> DispatchOutput:
+        quant_func = get_hip_quant(QuantType.per_1x128)
+        hidden_states, scale = quant_func(
+            kwargs["hidden_states"], quant_dtype=fp8_dtype
+        )
+        (
+            hidden_states,
+            dispatch_weights,
+            dispatch_scale,
+            dispatch_ids,
+            dispatch_recv_token_num,
+        ) = self.mori_op.dispatch(
+            hidden_states, kwargs["topk_weights"], scale, kwargs["topk_idx"]
+        )
+        return MORIOutput(
+            hidden_states,
+            dispatch_ids,
+            dispatch_weights,
+            dispatch_scale,
+            dispatch_recv_token_num,
+        )
+
+    def combine(self, *args, **kwargs) -> Tuple:
+        hidden_states, _ = self.mori_op.combine(
+            kwargs["hidden_states"],
+            kwargs["topk_weights"],
+            kwargs["topk_idx"],
+        )
+        return hidden_states

@@ -256,7 +256,7 @@ class ServerArgs:
 
     # Expert parallelism
     ep_size: int = 1
-    moe_a2a_backend: Literal["none", "deepep"] = "none"
+    moe_a2a_backend: Literal["none", "deepep", "mori"] = "none"
     moe_runner_backend: Literal[
         "auto",
         "triton",
@@ -642,7 +642,7 @@ class ServerArgs:
                 )
 
         # DeepEP MoE
-        if self.moe_a2a_backend == "deepep":
+        if self.moe_a2a_backend == "deepep" or self.moe_a2a_backend == "mori":
             if self.deepep_mode == "normal":
                 logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
                 self.disable_cuda_graph = True
@@ -1526,7 +1526,7 @@ class ServerArgs:
         parser.add_argument(
             "--moe-a2a-backend",
             type=str,
-            choices=["none", "deepep"],
+            choices=["none", "deepep", "mori"],
             default=ServerArgs.moe_a2a_backend,
             help="Choose the backend for MoE A2A.",
         )

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         AscendDeepEPLLOutput,
         DeepEPLLOutput,
         DeepEPNormalOutput,
+        MORIOutput,
         StandardDispatchOutput,
     )
 
@@ -47,6 +48,12 @@ class DispatchOutputChecker:
     ) -> TypeGuard[AscendDeepEPLLOutput]:
         return dispatch_output.format.is_ascent_ll()
 
+    @staticmethod
+    def format_is_mori(
+        dispatch_output: DispatchOutput,
+    ) -> TypeGuard[MORIOutput]:
+        return dispatch_output.format.is_mori()
+
 
 class DispatchOutputFormat(Enum):
 
@@ -54,6 +61,7 @@ class DispatchOutputFormat(Enum):
     DEEPEP_NORMAL = auto()
     DEEPEP_LL = auto()
     ASCENT_LL = auto()
+    MORI = auto()
 
     def is_standard(self) -> bool:
         return self == DispatchOutputFormat.STANDARD
@@ -72,6 +80,9 @@ class DispatchOutputFormat(Enum):
 
     def is_ascent_ll(self) -> bool:
         return self == DispatchOutputFormat.ASCENT_LL
+
+    def is_mori(self) -> bool:
+        return self == DispatchOutputFormat.MORI
 
 
 @runtime_checkable
