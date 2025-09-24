@@ -12,6 +12,8 @@ if TYPE_CHECKING:
         DeepEPLLOutput,
         DeepEPNormalCombineInput,
         DeepEPNormalOutput,
+        MORICombineInput,
+        MORIOutput,
         StandardCombineInput,
         StandardDispatchOutput,
     )
@@ -46,12 +48,19 @@ class DispatchOutputChecker:
     ) -> TypeGuard[Union[DeepEPNormalOutput, DeepEPLLOutput]]:
         return dispatch_output.format.is_deepep()
 
+    @staticmethod
+    def format_is_mori(
+        dispatch_output: DispatchOutput,
+    ) -> TypeGuard[MORIOutput]:
+        return dispatch_output.format.is_mori()
+
 
 class DispatchOutputFormat(Enum):
 
     STANDARD = "standard"
     DEEPEP_NORMAL = "deepep_normal"
     DEEPEP_LL = "deepep_ll"
+    MORI = "mori"
 
     def is_standard(self) -> bool:
         return self == DispatchOutputFormat.STANDARD
@@ -67,6 +76,9 @@ class DispatchOutputFormat(Enum):
             DispatchOutputFormat.DEEPEP_NORMAL,
             DispatchOutputFormat.DEEPEP_LL,
         ]
+
+    def is_mori(self) -> bool:
+        return self == DispatchOutputFormat.MORI
 
 
 @runtime_checkable
@@ -110,11 +122,18 @@ class CombineInputChecker:
             CombineInputFormat.DEEPEP_LL,
         ]
 
+    @staticmethod
+    def format_is_mori(
+        combine_input: CombineInput,
+    ) -> TypeGuard[MORICombineInput]:
+        return combine_input.format == CombineInputFormat.MORI
+
 
 class CombineInputFormat(Enum):
     STANDARD = "standard"
     DEEPEP_NORMAL = "deepep_normal"
     DEEPEP_LL = "deepep_ll"
+    MORI = "mori"
 
 
 @runtime_checkable

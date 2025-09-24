@@ -524,6 +524,7 @@ class DeepseekV2MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             layer_id=self.layer_id,
+            params_dtype=config.torch_dtype,
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
@@ -620,7 +621,7 @@ class DeepseekV2MoE(nn.Module):
                 return_recv_hook=True,
             )
 
-        self._enable_deepep_moe = get_moe_a2a_backend().is_deepep()
+        self._enable_deepep_moe = not get_moe_a2a_backend().is_none()
 
     def get_moe_weights(self):
         return [
@@ -658,6 +659,8 @@ class DeepseekV2MoE(nn.Module):
                     use_reduce_scatter,
                     gemm_output_zero_allocator,
                 )
+        elif get_moe_a2a_backend().is_mori():
+            return self.forward_mori(hidden_states)
         else:
             return self.forward_deepep(hidden_states, forward_batch)
 
@@ -826,6 +829,46 @@ class DeepseekV2MoE(nn.Module):
             topk_weights=topk_weights,
             forward_batch=forward_batch,
         )
+
+        if shared_output is not None:
+            x = shared_output
+            if self.experts.should_fuse_routed_scaling_factor_in_topk():
+                x.add_(final_hidden_states)
+            else:
+                x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+            final_hidden_states = x
+        else:
+            if not self.experts.should_fuse_routed_scaling_factor_in_topk():
+                final_hidden_states *= self.routed_scaling_factor
+
+        return final_hidden_states
+
+    def forward_mori(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        shared_output = None
+        token_num = hidden_states.shape[0]
+        if hidden_states.shape[0] > 0:
+            # router_logits: (num_tokens, n_experts)
+            router_logits = self.gate(hidden_states)
+            shared_output = self._forward_shared_experts(hidden_states)
+            topk_weights, topk_idx, _ = self.topk(
+                hidden_states,
+                router_logits,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
+            )
+        else:
+            topk_weights, topk_idx, _ = self.topk.empty_topk_output(
+                hidden_states.device
+            )
+
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+        final_hidden_states = final_hidden_states[:token_num]
 
         if shared_output is not None:
             x = shared_output
