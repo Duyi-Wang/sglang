@@ -91,6 +91,33 @@ WORKDIR /sgl-workspace
 
 RUN rm -rf /sgl-workspace/*
 
+ARG PYTORCH_BRANCH="1c57644d"
+ARG PYTORCH_VISION_BRANCH="v0.23.0"
+ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
+ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
+
+RUN git clone ${PYTORCH_REPO} pytorch
+RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
+    && pip install -r requirements.txt && git submodule update --init --recursive \
+    && python3 tools/amd_build/build_amd.py \
+    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install dist/*.whl
+RUN git clone ${PYTORCH_VISION_REPO} vision
+RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install dist/*.whl
+RUN git clone ${PYTORCH_AUDIO_REPO} audio
+RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install dist/*.whl
+# RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
+#     && cp /app/vision/dist/*.whl /app/install \
+#     && cp /app/audio/dist/*.whl /app/install
+
 # -----------------------
 # llvm
 RUN if [ "$BUILD_LLVM" = "1" ]; then \
