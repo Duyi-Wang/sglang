@@ -89,6 +89,8 @@ RUN apt-get install -y initramfs-tools jq libopenmpi-dev libpci-dev
 
 WORKDIR /sgl-workspace
 
+RUN rm -rf /sgl-workspace/*
+
 # -----------------------
 # llvm
 RUN if [ "$BUILD_LLVM" = "1" ]; then \
