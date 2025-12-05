@@ -104,6 +104,7 @@ from sglang.srt.layers.moe.utils import RoutingMethodType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.fp8_kernel import (
+    fp8_dtype,
     is_fp8_fnuz,
     per_tensor_quant_mla_fp8,
     per_token_group_quant_mla_deep_gemm_masked_fp8,
@@ -187,7 +188,7 @@ if _use_aiter_gfx95:
     )
     from sglang.srt.layers.rocm_linear_utils import (
         aiter_dsv3_router_gemm,
-        fused_qk_rope_cat,
+        fused_qk_rope_cat_and_cache_mla,
         get_dsv3_gemm_output_zero_allocator_size,
     )
 
@@ -735,7 +736,11 @@ class DeepseekV2MoE(nn.Module):
 
         self.top_k = config.num_experts_per_tok
 
-        if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake() or get_moe_a2a_backend().is_mori():
+        if (
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_mori()
+        ):
             # TODO: we will support tp < ep in the future
             self.ep_size = get_moe_expert_parallel_world_size()
             self.num_experts = (
@@ -752,7 +757,9 @@ class DeepseekV2MoE(nn.Module):
             )
 
         self._enable_a2a_moe = (
-            get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake() or get_moe_a2a_backend().is_mori()
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_mori()
         )
         self._fuse_shared_experts_inside_sbo = SboFlags.fuse_shared_experts_inside_sbo()
 
@@ -1110,7 +1117,9 @@ class DeepseekV2MoE(nn.Module):
                 x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
             final_hidden_states = x
         else:
-            if not (self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter):
+            if not (
+                self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter
+            ):
                 final_hidden_states *= self.routed_scaling_factor
 
         return final_hidden_states
@@ -2004,6 +2013,8 @@ class DeepseekV2AttentionMLA(nn.Module):
         topk_indices,
         llama_4_scaling,
     ):
+        save_kv_cache = True
+
         if self.current_attention_backend in FORWARD_ABSORB_CORE_ATTENTION_BACKENDS:
             extra_args = {}
             if self._fuse_rope_for_trtllm_mla(forward_batch):
@@ -2027,16 +2038,29 @@ class DeepseekV2AttentionMLA(nn.Module):
             if _use_aiter_gfx95:
                 cos = self.rotary_emb.cos_cache
                 sin = self.rotary_emb.sin_cache
-                q, k = fused_qk_rope_cat(
+
+                kv_cache_dtype = (
+                    fp8_dtype if self.kv_cache_dtype == "fp8_e4m3" else q_nope_out.dtype
+                )
+
+                q, _, _, k = fused_qk_rope_cat_and_cache_mla(
                     q_nope_out,
                     q_pe,
                     k_nope,
                     k_pe,
+                    forward_batch.token_to_kv_pool.get_key_buffer(
+                        self.attn_mqa.layer_id
+                    ),
+                    forward_batch.out_cache_loc,
                     positions,
                     cos,
                     sin,
+                    self.attn_mqa.k_scale,
                     self.rotary_emb.is_neox_style,
+                    q_out_dtype=kv_cache_dtype,
                 )
+
+                save_kv_cache = False
             else:
                 q = torch.cat([q_nope_out, q_pe], dim=-1)
                 k = torch.cat([k_nope, k_pe], dim=-1)
@@ -2050,6 +2074,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 k,
                 k_nope,
                 forward_batch,
+                save_kv_cache=save_kv_cache,
                 **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
             )
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
@@ -3277,7 +3302,9 @@ class DeepseekV2ForCausalLM(nn.Module):
             and torch.cuda.get_device_capability("cuda") < (9, 4)
         ):
             disable_reason = "Only Deepseek V3/R1 on AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization under expert parallelism."
-        elif disable_reason is None and (get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori()):
+        elif disable_reason is None and (
+            get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori()
+        ):
             disable_reason = "Deepseek V3/R1 can not use shared experts fusion optimization under deepep expert parallelism."
         elif self.quant_config and self.quant_config.get_name() == "w4afp8":
             disable_reason = "Deepseek V3/R1 W4AFP8 model uses different quant method for routed experts and shared experts."
