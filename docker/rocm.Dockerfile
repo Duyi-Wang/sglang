@@ -7,7 +7,7 @@
 # Default base images
 ARG BASE_IMAGE_942="rocm/sgl-dev:vllm20250114"
 ARG BASE_IMAGE_942_ROCM700="rocm/sgl-dev:rocm7-vllm-20250904"
-ARG BASE_IMAGE_950="rocm/sgl-dev:rocm7-vllm-20250904"
+ARG BASE_IMAGE_950="henryx/xsgl:v0.5.6-rocm711-mi35x-test-20251205"
 
 # This is necessary for scope purpose
 ARG GPU_ARCH=gfx950
@@ -31,7 +31,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.7.post1"
+ENV AITER_COMMIT="mla_fake_non_persistent"
 ENV NO_DEPS_FLAG=""
 
 # ===============================
@@ -42,7 +42,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="0"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.7.post2"
+ENV AITER_COMMIT="mla_fake_non_persistent"
 ENV NO_DEPS_FLAG=""
 # ===============================
 # Chosen arch and args
@@ -52,14 +52,18 @@ FROM ${GPU_ARCH}
 ARG GPU_ARCH=gfx950
 ENV GPU_ARCH_LIST=${GPU_ARCH%-*}
 
-ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
+ARG SGL_REPO="https://github.com/Duyi-Wang/sglang.git"
 ARG SGL_DEFAULT="main"
-ARG SGL_BRANCH=${SGL_DEFAULT}
+ARG SGL_BRANCH="mori_ep_1205"
 
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG TRITON_COMMIT="improve_fa_decode_3.0.0"
 
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+
+ENV MORI_GPU_ARCHS=gfx942;gfx950
+ARG MORI_COMMIT="ionic_new_950_1128"
+ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 ARG LLVM_REPO="https://github.com/jrbyrnes/llvm-project.git"
 ARG LLVM_BRANCH="MainOpSelV2"
@@ -80,6 +84,8 @@ USER root
 # Install some basic utilities
 RUN python -m pip install --upgrade pip && pip install setuptools_scm
 RUN apt-get purge -y sccache; python -m pip uninstall -y sccache; rm -f "$(which sccache)"
+# For mori and ainic dependencies
+RUN apt-get install -y initramfs-tools jq libopenmpi-dev libpci-dev
 
 WORKDIR /sgl-workspace
 
@@ -112,6 +118,12 @@ RUN cd aiter \
         else \
           sh -c "GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
         fi
+
+RUN pip uninstall -y mori
+RUN git clone ${MORI_REPO} \
+ && cd mori \
+ && git checkout ${MORI_COMMIT} \
+ && git submodule update --init --recursive
 
 # -----------------------
 # Triton
