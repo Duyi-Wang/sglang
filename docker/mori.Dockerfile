@@ -27,8 +27,9 @@ RUN git clone ${MORI_REPO} \
 
 # AITER
 RUN pip uninstall -y aiter
+RUN rm -rf aiter
+RUN git clone ${AITER_REPO} aiter
 RUN cd aiter \
-    && git fetch --all \
     && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop
