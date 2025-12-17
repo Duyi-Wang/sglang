@@ -48,7 +48,7 @@ ENV GPU_ARCH_LIST=${GPU_ARCH%-*}
 ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
 ARG SGL_DEFAULT="main"
 # ARG SGL_BRANCH="amd_mori"
-ARG SGL_BRANCH="1dec9e80b8d8d0b86180dc5cb3202528145cddc7"
+ARG SGL_BRANCH="v0.5.6.post1"
 
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # ARG MORI_COMMIT="ionic_new_950_1128"
