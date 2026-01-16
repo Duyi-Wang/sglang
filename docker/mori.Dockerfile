@@ -10,7 +10,7 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.7.post5"
+ARG AITER_BRANCH="v0.1.9.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -145,15 +145,6 @@ ENV NO_DEPS_FLAG=""
 # This is necessary for scope purpose, again
 ENV GPU_ARCH_LIST=${GPU_ARCH%-*}
 
-ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
-ARG SGL_DEFAULT="main"
-# ARG SGL_BRANCH="amd_mori"
-ARG SGL_BRANCH="1dec9e80b8d8d0b86180dc5cb3202528145cddc7"
-
-ARG MORI_REPO="https://github.com/ROCm/mori.git"
-# ARG MORI_COMMIT="ionic_new_950_1128"
-ARG MORI_COMMIT="5b3466cd6de97934e5abc0f6eeab0b47c3c9b749"
-
 ARG MOONCAKE_REPO="https://github.com/Duyi-Wang/Mooncake.git"
 ARG MOONCAKE_COMMIT="amd_mori"
 
@@ -211,6 +202,14 @@ RUN if [ "$BUILD_MOONCAKE" = "1" ]; then \
 
 # -----------------------
 # Build SGLang
+
+# ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
+ARG SGL_REPO="https://github.com/HaiShaw/sglang.git"
+ARG SGL_DEFAULT="main"
+# ARG SGL_BRANCH="amd_mori"
+# ARG SGL_BRANCH="mori-ep"
+ARG SGL_BRANCH="1983ee43b48caf0453977d536030ab5e141f60d6"
+
 ARG BUILD_TYPE=all
 
 RUN pip install IPython \
@@ -386,6 +385,10 @@ RUN apt-get update \
 
 #  Enable AINIC in mori
 ENV USE_IONIC=ON
+
+ARG MORI_REPO="https://github.com/ROCm/mori.git"
+# ARG MORI_COMMIT="ionic_new_950_1128"
+ARG MORI_COMMIT="b0dce4beebeb1f26c784eee17d5fd9785ee9447f"
 
 RUN git clone ${MORI_REPO} \
     && cd mori \
