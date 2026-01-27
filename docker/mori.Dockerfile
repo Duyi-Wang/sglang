@@ -10,8 +10,13 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.9.post1"
-ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+# ARG AITER_BRANCH="v0.1.9.post1"
+# ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+# v0.1.9.post1 revert
+ARG AITER_BRANCH="96149328a64905e5cd8fdb27e3e6f3645455f9bd"
+# v0.1.9.post1 revert + tunned gemm
+# ARG AITER_BRANCH="1ac0206986f5e6ff36595cfb37ca5d3149d9da66"
+ARG AITER_REPO="https://github.com/Duyi-Wang/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
 
@@ -208,7 +213,7 @@ ARG SGL_REPO="https://github.com/HaiShaw/sglang.git"
 ARG SGL_DEFAULT="main"
 # ARG SGL_BRANCH="amd_mori"
 # ARG SGL_BRANCH="mori-ep"
-ARG SGL_BRANCH="1983ee43b48caf0453977d536030ab5e141f60d6"
+ARG SGL_BRANCH="f21ecce362551155897a69e77f85bde9c45358eb"
 
 ARG BUILD_TYPE=all
 
@@ -388,7 +393,8 @@ ENV USE_IONIC=ON
 
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # ARG MORI_COMMIT="ionic_new_950_1128"
-ARG MORI_COMMIT="b0dce4beebeb1f26c784eee17d5fd9785ee9447f"
+# ARG MORI_COMMIT="b0dce4beebeb1f26c784eee17d5fd9785ee9447f"
+ARG MORI_COMMIT="b9a630324f8472c323586fb11a3984df9f2f9c27"
 
 RUN git clone ${MORI_REPO} \
     && cd mori \
