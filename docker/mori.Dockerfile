@@ -14,7 +14,7 @@ ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 # ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 # v0.1.9.post1 revert
 ARG AITER_BRANCH="96149328a64905e5cd8fdb27e3e6f3645455f9bd"
-# v0.1.9.post1 revert + tunned gemm
+# v0.1.9.post1 revert + tuned gemm
 # ARG AITER_BRANCH="1ac0206986f5e6ff36595cfb37ca5d3149d9da66"
 ARG AITER_REPO="https://github.com/Duyi-Wang/aiter.git"
 
@@ -209,11 +209,12 @@ RUN if [ "$BUILD_MOONCAKE" = "1" ]; then \
 # Build SGLang
 
 # ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
-ARG SGL_REPO="https://github.com/HaiShaw/sglang.git"
+# ARG SGL_REPO="https://github.com/HaiShaw/sglang.git"
+ARG SGL_REPO="https://github.com/Duyi-Wang/sglang.git"
 ARG SGL_DEFAULT="main"
 # ARG SGL_BRANCH="amd_mori"
 # ARG SGL_BRANCH="mori-ep"
-ARG SGL_BRANCH="f21ecce362551155897a69e77f85bde9c45358eb"
+ARG SGL_BRANCH="526af4236d532b0a225de2d6fe60de8362345dfa"
 
 ARG BUILD_TYPE=all
 
@@ -379,7 +380,7 @@ RUN echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdainic.gpg] \
 https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_VERSION} ${UBUNTU_CODENAME} main" \
     > /etc/apt/sources.list.d/amdainic.list
 
-    
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libionic-dev \
