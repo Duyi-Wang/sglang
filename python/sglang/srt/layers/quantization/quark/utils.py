@@ -109,6 +109,10 @@ def _is_equal_or_regex_match(
     additionally checks if the target string is contained within the value.
     """
 
+    #TODO(billishyahao): This is compatible with quark dsr1-0528. Need a graceful fix
+    if target == "re:model.layers.61.*":
+        target = "re:model.decoder.*"
+
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
@@ -118,6 +122,7 @@ def _is_equal_or_regex_match(
             return True
     elif target == value:
         return True
+
     return False
 
 

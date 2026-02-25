@@ -248,6 +248,9 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # #FIXME(billishyahao): need to understand why 
+        # for (k, t) in weights:
+        #     logger.info(f"bill-dbg: nextn load_weights: {k=}, {t.shape=}")
         super().load_weights(weights, is_nextn=True)
 
 
