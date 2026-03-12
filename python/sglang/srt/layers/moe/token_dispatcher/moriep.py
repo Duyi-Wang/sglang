@@ -171,7 +171,7 @@ def get_ep_dispatch_configs(num_max_dispatch_tokens_per_rank: int = 4096):
     }
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def _get_mori_dispatch_quant_flags(is_nextn=False):
     fp8_dispatch = get_bool_env_var("SGLANG_MORI_FP8_DISP", "False")
     fp4_dispatch = get_bool_env_var("SGLANG_MORI_FP4_DISP", "False")
@@ -204,7 +204,7 @@ def _get_mori_dispatch_quant_flags(is_nextn=False):
 
 # init_mori_op only needs do once in model initial stage
 # use lru_cache to reuse the same mori_op instance to avoid the init overhead for mori
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def init_mori_op(
     group,
     router_topk,
