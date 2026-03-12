@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple
 
@@ -172,33 +171,15 @@ def get_ep_dispatch_configs(num_max_dispatch_tokens_per_rank: int = 4096):
 
 
 @lru_cache(maxsize=2)
-def _get_mori_dispatch_quant_flags(is_nextn=False):
+def _get_mori_dispatch_quant_flags():
     fp8_dispatch = get_bool_env_var("SGLANG_MORI_FP8_DISP", "False")
     fp4_dispatch = get_bool_env_var("SGLANG_MORI_FP4_DISP", "False")
-
-    if is_nextn:
-        # If no NEXTN variables set, use base variables
-        if (
-            "SGLANG_MORI_NEXTN_FP8_DISP" in os.environ
-            or "SGLANG_MORI_NEXTN_FP4_DISP" in os.environ
-        ):
-            fp8_dispatch = get_bool_env_var("SGLANG_MORI_NEXTN_FP8_DISP", "False")
-            fp4_dispatch = get_bool_env_var("SGLANG_MORI_NEXTN_FP4_DISP", "False")
-
-            if fp8_dispatch and fp4_dispatch:
-                logger.warning(
-                    "Both SGLANG_MORI_NEXTN_FP8_DISP and SGLANG_MORI_NEXTN_FP4_DISP are set to True. "
-                    "Using SGLANG_MORI_NEXTN_FP4_DISP and ignoring SGLANG_MORI_NEXTN_FP8_DISP."
-                )
-                fp8_dispatch = False
-
     if fp8_dispatch and fp4_dispatch:
         logger.warning(
             "Both SGLANG_MORI_FP8_DISP and SGLANG_MORI_FP4_DISP are set to True. "
             "Using SGLANG_MORI_FP4_DISP and ignoring SGLANG_MORI_FP8_DISP."
         )
         fp8_dispatch = False
-
     return fp8_dispatch, fp4_dispatch
 
 
@@ -215,7 +196,6 @@ def init_mori_op(
     num_max_dispatch_tokens_per_rank,
     deepep_mode,
     instance_id=0,
-    is_nextn=False,
 ):
 
     import mori
@@ -253,7 +233,7 @@ def init_mori_op(
     data_type = fp8_dtype
     scale_type_size = torch.float32.itemsize
 
-    fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags(is_nextn)
+    fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags()
 
     if fp8_dispatch:
         scale_dim = hidden_size // 128
@@ -333,7 +313,6 @@ class _MoriEPDispatcherImplBase:
         params_dtype: torch.dtype,
         deepep_mode: DeepEPMode,
         instance_id: int = 0,
-        is_nextn: bool = False,
     ):
         try:
             import mori  # noqa: F401
@@ -348,7 +327,6 @@ class _MoriEPDispatcherImplBase:
         self.params_dtype = params_dtype
         self.deepep_mode = deepep_mode
         self.instance_id = instance_id
-        self.is_nextn = is_nextn
 
         self.num_max_dispatch_tokens_per_rank = get_int_env_var(
             "SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK", 4096
@@ -364,7 +342,6 @@ class _MoriEPDispatcherImplBase:
             self.num_max_dispatch_tokens_per_rank,
             self.deepep_mode,
             self.instance_id,
-            self.is_nextn,
         )
 
         self.quant_config: Optional[dict] = None
@@ -439,7 +416,7 @@ class _MoriEPDispatcherImplNormal(_MoriEPDispatcherImplBase):
         num_tokens = hidden_states.shape[0]
         output_dtype = hidden_states.dtype
         scale = None
-        fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags(self.is_nextn)
+        fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags()
 
         if fp8_dispatch:
             if num_tokens > 0:
@@ -682,7 +659,7 @@ class _MoriEPDispatcherImplLowLatency(_MoriEPDispatcherImplBase):
         output_dtype = hidden_states.dtype
         scale = None
 
-        fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags(self.is_nextn)
+        fp8_dispatch, fp4_dispatch = _get_mori_dispatch_quant_flags()
 
         if fp8_dispatch:
             # FP8 quant
@@ -856,7 +833,6 @@ class MoriEPDispatcher(BaseDispatcher):
         async_finish: bool = False,
         return_recv_hook: bool = False,
         instance_id: int = 0,
-        is_nextn: bool = False,
     ):
         super().__init__()
 
@@ -872,7 +848,6 @@ class MoriEPDispatcher(BaseDispatcher):
             params_dtype=params_dtype,
             deepep_mode=deepep_mode,
             instance_id=instance_id,
-            is_nextn=is_nextn,
         )
 
         if self.deepep_mode.enable_low_latency():
