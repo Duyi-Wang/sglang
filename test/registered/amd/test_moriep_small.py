@@ -69,7 +69,6 @@ class TestPureDP(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
 
@@ -113,7 +112,6 @@ class TestMTP(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
 
@@ -166,7 +164,6 @@ class TestNormal(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
 
@@ -213,7 +210,6 @@ class TestLowLatency(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
         # FIXME(billishyahao): enable p2p due to no rdma devices on CI machine
@@ -263,7 +259,6 @@ class TestTBOwithLowLatency(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
         # FIXME(billishyahao): enable p2p due to no rdma devices on CI machine
@@ -317,7 +312,6 @@ class TestMTPwithTBO(CustomTestCase):
 
         env = dict(os.environ)
         env["SGLANG_USE_AITER"] = "1"
-        env["SGLANG_MORI_FP8_DISP"] = "False"
         env["SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = "16384"
         env["MORI_SHMEM_MODE"] = "ISOLATION"  # avoid out of symmetric heap memory
         # FIXME(billishyahao): enable p2p due to no rdma devices on CI machine

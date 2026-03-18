@@ -160,6 +160,9 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
 
+        if hasattr(layer, "dispatcher"):
+            layer.dispatcher.set_quant_config({"weight_dtype": layer.w13_weight.dtype})
+
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
