@@ -2210,6 +2210,7 @@ class AiterAttnBackend(AttentionBackend):
                     ),
                     intra_batch_mode=intra_batch_mode,
                     num_kv_splits=num_kv_splits,
+                    return_lse=True,
                 )
                 return o
             elif (
@@ -2268,6 +2269,7 @@ class AiterAttnBackend(AttentionBackend):
                         ),
                         intra_batch_mode=intra_batch_mode,
                         num_kv_splits=num_kv_splits,
+                        return_lse=True,
                     )
 
                     total_valid_q = int(qo_indptr[-1].item())
@@ -2303,6 +2305,7 @@ class AiterAttnBackend(AttentionBackend):
                         ),
                         intra_batch_mode=intra_batch_mode,
                         num_kv_splits=num_kv_splits,
+                        return_lse=True,
                     )
                     return o
             else:
@@ -2470,6 +2473,7 @@ class AiterAttnBackend(AttentionBackend):
                 kv_scale=layer.k_scale if layer.k_scale is not None else self.k_scale,
                 intra_batch_mode=intra_batch_mode,
                 num_kv_splits=num_kv_splits,
+                return_lse=True,
             )
         else:
             self.logits_soft_cap = layer.logit_cap
