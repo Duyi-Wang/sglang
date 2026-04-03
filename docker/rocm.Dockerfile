@@ -59,8 +59,167 @@ ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 ENV AITER_COMMIT_DEFAULT="v0.1.11.post1"
 
-# ===============================
-# Chosen arch and args
+# ================================================================
+# Builder stage: sgl-model-gateway (builds Rust wheel, discarded)
+# ================================================================
+FROM ${GPU_ARCH} AS builder-gateway
+
+ARG GPU_ARCH=gfx950
+ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
+ARG SGL_DEFAULT="main"
+ARG SGL_BRANCH=${SGL_DEFAULT}
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && pip install --no-cache-dir maturin \
+    && (git clone --depth 1 -b ${SGL_BRANCH} ${SGL_REPO} /tmp/sglang 2>/dev/null \
+        || (git clone ${SGL_REPO} /tmp/sglang && cd /tmp/sglang && git checkout ${SGL_BRANCH})) \
+    && cd /tmp/sglang/sgl-model-gateway/bindings/python \
+    && ulimit -n 65536 && CARGO_BUILD_JOBS=4 maturin build --release --features vendored-openssl --out /tmp/gateway-wheel
+
+# ================================================================
+# Builder stage: Mooncake (builds C++ lib, discarded)
+# ================================================================
+FROM ${GPU_ARCH} AS builder-mooncake
+
+ARG GPU_ARCH=gfx950
+ARG MOONCAKE_REPO="https://github.com/kvcache-ai/Mooncake.git"
+ARG MOONCAKE_COMMIT="b6a841dc78c707ec655a563453277d969fb8f38d"
+
+ENV PATH=$PATH:/usr/local/go/bin
+
+# Build Mooncake and install to a staging directory for later COPY
+# Always create the staging dir so COPY --from=builder-mooncake never fails
+RUN mkdir -p /mooncake-install/usr/local \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        zip unzip wget gcc make libtool autoconf \
+        librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool \
+        libibverbs-dev rdma-core \
+        openssh-server openmpi-bin openmpi-common libopenmpi-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && (git clone --depth 1 -b ${MOONCAKE_COMMIT} ${MOONCAKE_REPO} /tmp/Mooncake 2>/dev/null \
+        || (git clone ${MOONCAKE_REPO} /tmp/Mooncake && cd /tmp/Mooncake && git checkout ${MOONCAKE_COMMIT})) \
+    && cd /tmp/Mooncake \
+    && git submodule update --init --recursive \
+    && bash dependencies.sh -y \
+    && rm -rf /usr/local/go \
+    && wget -q https://go.dev/dl/go1.22.2.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.22.2.linux-amd64.tar.gz \
+    && rm go1.22.2.linux-amd64.tar.gz \
+    && mkdir -p build && cd build \
+    && cmake .. -DUSE_HIP=ON -DUSE_ETCD=ON \
+    && make -j "$(nproc)" \
+    && DESTDIR=/mooncake-install make install
+
+# ================================================================
+# Builder stage: FHT (builds HIP extension, discarded)
+# ================================================================
+FROM ${GPU_ARCH} AS builder-fht
+
+ARG FHT_REPO="https://github.com/jeffdaily/fast-hadamard-transform.git"
+ARG FHT_BRANCH="rocm"
+ARG FHT_COMMIT="46efb7d776d38638fc39f3c803eaee3dd7016bd1"
+
+RUN pip install --no-cache-dir wheel \
+    && (git clone --depth 1 -b "${FHT_COMMIT}" "${FHT_REPO}" /tmp/fht 2>/dev/null \
+        || (git clone "${FHT_REPO}" /tmp/fht && cd /tmp/fht && git checkout -f "${FHT_COMMIT}")) \
+    && cd /tmp/fht \
+    && FAST_HADAMARD_TRANSFORM_FORCE_BUILD=TRUE python setup.py bdist_wheel -d /tmp/fht-wheel
+
+# ================================================================
+# Builder stage: TileLang (builds wheel, discarded)
+# ================================================================
+FROM ${GPU_ARCH} AS builder-tilelang
+
+ARG GPU_ARCH=gfx950
+ARG TILELANG_REPO="https://github.com/tile-ai/tilelang.git"
+ARG TILELANG_COMMIT="a55a82302bf7f3c5af635b5c9146f728185cc900"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN /bin/bash -lc 'set -euo pipefail; \
+  echo "[TileLang] Building TileLang wheel for ${GPU_ARCH}"; \
+  apt-get update && apt-get install -y --no-install-recommends \
+      build-essential git wget curl ca-certificates gnupg \
+      libgtest-dev libgmock-dev \
+      libprotobuf-dev protobuf-compiler libgflags-dev libsqlite3-dev \
+      python3 python3-dev python3-setuptools python3-pip python3-apt \
+      gcc libtinfo-dev zlib1g-dev libedit-dev libxml2-dev \
+      cmake ninja-build pkg-config libstdc++6 software-properties-common \
+  && rm -rf /var/lib/apt/lists/*; \
+  \
+  VENV_PY="/opt/venv/bin/python"; \
+  VENV_PIP="/opt/venv/bin/pip"; \
+  if [ ! -x "$VENV_PY" ]; then VENV_PY="python3"; fi; \
+  if [ ! -x "$VENV_PIP" ]; then VENV_PIP="pip3"; fi; \
+  \
+  cmake -S /usr/src/googletest -B /tmp/build-gtest -DBUILD_GTEST=ON -DBUILD_GMOCK=ON -DCMAKE_BUILD_TYPE=Release && \
+  cmake --build /tmp/build-gtest -j"$(nproc)" && \
+  cp -v /tmp/build-gtest/lib/*.a /usr/lib/x86_64-linux-gnu/ && \
+  rm -rf /tmp/build-gtest; \
+  \
+  "$VENV_PIP" install --no-cache-dir --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core; \
+  \
+  LLVM_CONFIG_PATH=""; \
+  for p in /opt/rocm/llvm/bin/llvm-config /opt/rocm/llvm-*/bin/llvm-config /opt/rocm-*/llvm*/bin/llvm-config; do \
+    if [ -x "$p" ]; then LLVM_CONFIG_PATH="$p"; break; fi; \
+  done; \
+  if [ -z "$LLVM_CONFIG_PATH" ]; then \
+    echo "[TileLang] ROCm llvm-config not found; installing LLVM 18..."; \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /etc/apt/keyrings/llvm.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" > /etc/apt/sources.list.d/llvm.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends llvm-18; \
+    rm -rf /var/lib/apt/lists/*; \
+    LLVM_CONFIG_PATH="$(command -v llvm-config-18)"; \
+    if [ -z "$LLVM_CONFIG_PATH" ]; then echo "ERROR: llvm-config-18 not found after install"; exit 1; fi; \
+  fi; \
+  echo "[TileLang] Using LLVM_CONFIG at: $LLVM_CONFIG_PATH"; \
+  export PATH="$(dirname "$LLVM_CONFIG_PATH"):/usr/local/bin:${PATH}"; \
+  export LLVM_CONFIG="$LLVM_CONFIG_PATH"; \
+  \
+  mkdir -p /usr/local/bin && \
+  printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16 && \
+  chmod +x /usr/local/bin/llvm-config-16; \
+  \
+  "$VENV_PIP" install --no-cache-dir "cython>=0.29.36,<3.0" "apache-tvm-ffi @ git+https://github.com/apache/tvm-ffi.git@37d0485b2058885bf4e7a486f7d7b2174a8ac1ce" "z3-solver==4.15.4.0"; \
+  \
+  (git clone --depth 1 --recursive -b "${TILELANG_COMMIT}" "${TILELANG_REPO}" /opt/tilelang 2>/dev/null \
+    || (git clone --recursive "${TILELANG_REPO}" /opt/tilelang && cd /opt/tilelang && git checkout -f "${TILELANG_COMMIT}")) && \
+  cd /opt/tilelang && \
+  git submodule update --init --recursive && \
+  if [ -f pyproject.toml ]; then sed -i "/^[[:space:]]*\"torch/d" pyproject.toml || true; fi && \
+  export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG} -DSKBUILD_SABI_VERSION= ${CMAKE_ARGS:-}" && \
+  "$VENV_PIP" wheel -w /tmp/tilelang-wheel . -v --no-build-isolation --no-deps && \
+  "$VENV_PIP" cache purge || true'
+
+# ================================================================
+# Builder stage: Triton (builds wheel, discarded)
+# ================================================================
+FROM ${GPU_ARCH} AS builder-triton
+
+ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
+ARG TRITON_COMMIT="42270451990532c67e69d753fbd026f28fcc4840"
+
+# BUILD_TRITON is inherited as ENV from the selected base stage
+# Always create output dir so COPY --from never fails
+RUN mkdir -p /tmp/triton-wheel \
+    && if [ "$BUILD_TRITON" = "1" ]; then \
+        pip uninstall -y triton \
+     && apt-get update && apt-get install -y --no-install-recommends cmake \
+     && rm -rf /var/lib/apt/lists/* \
+     && (git clone --depth 1 -b ${TRITON_COMMIT} ${TRITON_REPO} /tmp/triton-custom 2>/dev/null \
+         || (git clone ${TRITON_REPO} /tmp/triton-custom && cd /tmp/triton-custom && git checkout ${TRITON_COMMIT})) \
+     && cd /tmp/triton-custom \
+     && pip install --no-cache-dir -r python/requirements.txt \
+     && pip wheel --no-cache-dir --no-deps -w /tmp/triton-wheel .; \
+    fi
+
+# ================================================================
+# Final stage
+# ================================================================
 FROM ${GPU_ARCH}
 
 # This is necessary for scope purpose, again
@@ -75,9 +234,6 @@ ARG SGL_BRANCH=${SGL_DEFAULT}
 # Version override for setuptools_scm (used in nightly builds)
 ARG SETUPTOOLS_SCM_PRETEND_VERSION=""
 
-ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG TRITON_COMMIT="42270451990532c67e69d753fbd026f28fcc4840"
-
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG AITER_COMMIT=""
 ENV AITER_COMMIT="${AITER_COMMIT:-${AITER_COMMIT_DEFAULT}}"
@@ -85,16 +241,6 @@ ENV AITER_COMMIT="${AITER_COMMIT:-${AITER_COMMIT_DEFAULT}}"
 ARG LLVM_REPO="https://github.com/jrbyrnes/llvm-project.git"
 ARG LLVM_BRANCH="MainOpSelV2"
 ARG LLVM_COMMIT="6520ace8227ffe2728148d5f3b9872a870b0a560"
-
-ARG MOONCAKE_REPO="https://github.com/kvcache-ai/Mooncake.git"
-ARG MOONCAKE_COMMIT="b6a841dc78c707ec655a563453277d969fb8f38d"
-
-ARG TILELANG_REPO="https://github.com/tile-ai/tilelang.git"
-ARG TILELANG_COMMIT="a55a82302bf7f3c5af635b5c9146f728185cc900"
-
-ARG FHT_REPO="https://github.com/jeffdaily/fast-hadamard-transform.git"
-ARG FHT_BRANCH="rocm"
-ARG FHT_COMMIT="46efb7d776d38638fc39f3c803eaee3dd7016bd1"
 
 ARG ENABLE_MORI=0
 ARG NIC_BACKEND=none
@@ -133,10 +279,10 @@ RUN set -eux; \
         ;; \
     esac
 
-
-# Install some basic utilities
-RUN python -m pip install --upgrade pip && pip install setuptools_scm
-RUN apt-get purge -y sccache; python -m pip uninstall -y sccache; rm -f "$(which sccache)"
+# Install some basic utilities + pip deps (combined to reduce layers)
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir setuptools_scm IPython orjson python-multipart torchao==0.9.0 pybind11 \
+    && apt-get purge -y sccache 2>/dev/null || true; python -m pip uninstall -y sccache 2>/dev/null || true; rm -f "$(which sccache 2>/dev/null)" || true
 
 # Install AMD SMI Python package from ROCm distribution.
 # The ROCm 7.2 base image (rocm/pytorch) does not pre-install this package.
@@ -158,13 +304,16 @@ WORKDIR /sgl-workspace
 # llvm
 RUN if [ "$BUILD_LLVM" = "1" ]; then \
      ENV HIP_CLANG_PATH="/sgl-workspace/llvm-project/build/bin/" \
-     git clone --single-branch ${LLVM_REPO} -b ${LLVM_BRANCH} \
+     git clone ${LLVM_REPO} \
      && cd llvm-project \
      && git checkout ${LLVM_COMMIT} \
+     && git fetch --depth 1 origin $(git rev-parse HEAD) 2>/dev/null || true \
+     && git reflog expire --expire=now --all && git gc --prune=now \
      && mkdir build \
      && cd build \
      && cmake -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=1 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" -DLLVM_ENABLE_PROJECTS="clang;lld;" -DLLVM_ENABLE_RUNTIMES="compiler-rt" ../llvm \
-     && make -j$(nproc); \
+     && make -j$(nproc) \
+     && find /sgl-workspace/llvm-project -name '*.o' -delete; \
     fi
 
 # -----------------------
@@ -173,93 +322,76 @@ RUN if [ "$BUILD_LLVM" = "1" ]; then \
 # (SETUPTOOLS_SCM_PRETEND_VERSION is set later for SGLang nightly builds and would otherwise
 # leak into AITER's version when AITER uses setuptools_scm)
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=
-RUN pip uninstall -y aiter \
- && pip install flydsl==0.0.1.dev95158637 \
- && pip install psutil pybind11 # Required by AITER setup.py
-RUN git clone ${AITER_REPO} \
+RUN pip uninstall -y aiter 2>/dev/null || true \
+ && pip install --no-cache-dir flydsl==0.0.1.dev95158637 psutil pybind11 \
+ && git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout ${AITER_COMMIT} \
- && git submodule update --init --recursive
-
-# Hot patches for AITER in v0.1.10.post3
-# This is for ROCm 7.2 only, because of the image rebase from vllm
-# to rocm/pytorch.
-RUN set -eux; \
-    case "${GPU_ARCH}" in \
+ && git submodule update --init --recursive \
+ && git fetch --depth 1 origin $(git rev-parse HEAD) 2>/dev/null || true \
+ && git reflog expire --expire=now --all && git gc --prune=now \
+ # Hot patches for AITER (ROCm 7.2 only)
+ && case "${GPU_ARCH}" in \
       *rocm720*) \
         echo "ROCm 7.2 flavor detected from GPU_ARCH=${GPU_ARCH}"; \
-        cd aiter \
-        && sed -i '459 s/if.*:/if False:/' aiter/ops/triton/attention/pa_mqa_logits.py; \
+        sed -i '459 s/if.*:/if False:/' aiter/ops/triton/attention/pa_mqa_logits.py; \
         ;; \
       *) \
         echo "Not rocm720 (GPU_ARCH=${GPU_ARCH}), skip patch"; \
         ;; \
-    esac
-# [WA] from kk-huang
-# add sed -i '/c1 = torch.empty((M, D, S1 + S3) for aiter triton gemm config issue
-# the corresponding pr is https://github.com/ROCm/aiter/pull/2173
-# it will be removed when server launched issue is fixed by aiter
-RUN cd aiter \
-     && echo "[AITER] GPU_ARCH=${GPU_ARCH}" \
-     && sed -i '/c1 = torch.empty((M, D, S1 + S3), dtype=dtype, device=x.device)/i\    config = dict(config)' aiter/ops/triton/gemm/fused/fused_gemm_afp4wfp4_split_cat.py \
-     && if [ "$BUILD_AITER_ALL" = "1" ] && [ "$BUILD_LLVM" = "1" ]; then \
-          sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py build_ext --inplace" \
-          && sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ GPU_ARCHS=$GPU_ARCH_LIST pip install -e ."; \
-        elif [ "$BUILD_AITER_ALL" = "1" ]; then \
-          sh -c "PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py build_ext --inplace" \
-          && sh -c "GPU_ARCHS=$GPU_ARCH_LIST pip install -e ."; \
-        else \
-          sh -c "GPU_ARCHS=$GPU_ARCH_LIST pip install -e ."; \
-        fi \
-      && echo "export PYTHONPATH=/sgl-workspace/aiter:\${PYTHONPATH}" >> /etc/bash.bashrc
+    esac \
+ # [WA] from kk-huang - aiter triton gemm config issue (ROCm/aiter#2173)
+ && echo "[AITER] GPU_ARCH=${GPU_ARCH}" \
+ && sed -i '/c1 = torch.empty((M, D, S1 + S3), dtype=dtype, device=x.device)/i\    config = dict(config)' aiter/ops/triton/gemm/fused/fused_gemm_afp4wfp4_split_cat.py \
+ && if [ "$BUILD_AITER_ALL" = "1" ] && [ "$BUILD_LLVM" = "1" ]; then \
+      sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py build_ext --inplace" \
+      && sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ GPU_ARCHS=$GPU_ARCH_LIST pip install --no-cache-dir -e ."; \
+    elif [ "$BUILD_AITER_ALL" = "1" ]; then \
+      sh -c "PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py build_ext --inplace" \
+      && sh -c "GPU_ARCHS=$GPU_ARCH_LIST pip install --no-cache-dir -e ."; \
+    else \
+      sh -c "GPU_ARCHS=$GPU_ARCH_LIST pip install --no-cache-dir -e ."; \
+    fi \
+ && echo "export PYTHONPATH=/sgl-workspace/aiter:\${PYTHONPATH}" >> /etc/bash.bashrc \
+ # Cleanup: object files (editable install keeps source; keep .git for dev)
+ && find /sgl-workspace/aiter -name '*.o' -delete 2>/dev/null || true
 
 # -----------------------
-# Build Mooncake
-ENV PATH=$PATH:/usr/local/go/bin
+# Install Mooncake from builder stage
+# Runtime apt deps are needed (RDMA/openmpi); built libs come from builder-mooncake
 
 RUN if [ "$BUILD_MOONCAKE" = "1" ]; then \
-     apt update && apt install -y zip unzip wget && \
-     apt install -y gcc make libtool autoconf  librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool  libibverbs-dev rdma-core && \
-     apt install -y openssh-server openmpi-bin openmpi-common libopenmpi-dev && \
-     git clone ${MOONCAKE_REPO} && \
-     cd Mooncake && \
-     git checkout ${MOONCAKE_COMMIT} && \
-     git submodule update --init --recursive && \
-     bash dependencies.sh -y && \
-     rm -rf /usr/local/go && \
-     wget https://go.dev/dl/go1.22.2.linux-amd64.tar.gz && \
-     tar -C /usr/local -xzf go1.22.2.linux-amd64.tar.gz && \
-     rm go1.22.2.linux-amd64.tar.gz && \
-     mkdir -p build && \
-     cd build && \
-     cmake .. -DUSE_HIP=ON -DUSE_ETCD=ON && \
-     make -j "$(nproc)" && make install; \
+     apt-get update && apt-get install -y --no-install-recommends \
+         librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool \
+         libibverbs-dev rdma-core \
+         openssh-server openmpi-bin openmpi-common libopenmpi-dev \
+         libgoogle-glog-dev libjsoncpp-dev libunwind-dev libnuma-dev \
+         libboost-all-dev libssl-dev libyaml-cpp-dev libgflags-dev \
+         libgrpc-dev libgrpc++-dev libprotobuf-dev \
+     && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Copy Mooncake built artifacts from builder stage (only if BUILD_MOONCAKE=1)
+# COPY is unconditional in Dockerfile, so the files always get copied;
+# they are small (libs only) when mooncake was not built.
+# /usr/local/ contains libetcd_wrapper.so, transfer_engine_c.h, mooncake_master
+# The Python mooncake package is installed to site-packages via absolute path
+COPY --from=builder-mooncake /mooncake-install/ /
+
 # -----------------------
-# Build SGLang
+# Build SGLang (sgl-kernel non-editable + sglang editable in single layer)
 ARG BUILD_TYPE=all
 
 # Set version for setuptools_scm if provided (for nightly builds). Only pass in the SGLang
 # pip install RUN so it does not affect AITER, sgl-model-gateway, TileLang, FHT, MORI, etc.
 ARG SETUPTOOLS_SCM_PRETEND_VERSION
 
-RUN pip install IPython \
-    && pip install orjson \
-    && pip install python-multipart \
-    && pip install torchao==0.9.0 \
-    && pip install pybind11
-
-RUN pip uninstall -y sgl_kernel sglang
-RUN git clone ${SGL_REPO} \
+RUN pip uninstall -y sgl_kernel sglang 2>/dev/null || true \
+    && git clone ${SGL_REPO} \
     && cd sglang \
-    && if [ "${SGL_BRANCH}" = ${SGL_DEFAULT} ]; then \
-         echo "Using ${SGL_DEFAULT}, default branch."; \
-         git checkout ${SGL_DEFAULT}; \
-       else \
-         echo "Using ${SGL_BRANCH} branch."; \
-         git checkout ${SGL_BRANCH}; \
-       fi \
+    && git checkout ${SGL_BRANCH} \
+    && git fetch --depth 1 origin $(git rev-parse HEAD) 2>/dev/null || true \
+    && git reflog expire --expire=now --all && git gc --prune=now \
     && cd sgl-kernel \
     && rm -f pyproject.toml \
     && mv pyproject_rocm.toml pyproject.toml \
@@ -270,115 +402,47 @@ RUN git clone ${SGL_REPO} \
          export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION}" && python -m pip --no-cache-dir install -e "python[srt_hip,diffusion_hip]"; \
        else \
          export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION}" && python -m pip --no-cache-dir install -e "python[all_hip]"; \
-       fi
-
-RUN python -m pip cache purge
+       fi \
+    && find . -name '*.o' -delete 2>/dev/null || true \
+    && python -m pip cache purge
 
 # Copy config files to support MI300X in virtualized environments (MI300X_VF).  Symlinks will not be created in image build.
 RUN find /sgl-workspace/sglang/python/sglang/srt/layers/quantization/configs/ \
          /sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/configs/ \
          -type f -name '*MI300X*' | xargs -I {} sh -c 'vf_config=$(echo "$1" | sed "s/MI300X/MI300X_VF/"); cp "$1" "$vf_config"' -- {}
 
-# Install Rust toolchain for sgl-model-gateway
-ENV PATH="/root/.cargo/bin:${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && rustc --version && cargo --version
-ENV CARGO_BUILD_JOBS=4
-
-# Build and install sgl-model-gateway
-RUN python3 -m pip install --no-cache-dir maturin \
-    && cd /sgl-workspace/sglang/sgl-model-gateway/bindings/python \
-    && ulimit -n 65536 && maturin build --release --features vendored-openssl --out dist \
-    && python3 -m pip install --force-reinstall dist/*.whl \
-    && rm -rf /root/.cache
+# -----------------------
+# Install sgl-model-gateway wheel from builder stage (Rust never enters final image)
+COPY --from=builder-gateway /tmp/gateway-wheel/*.whl /tmp/wheels/
+RUN pip install --no-cache-dir --force-reinstall /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels
 
 # -----------------------
-# TileLang
-ENV DEBIAN_FRONTEND=noninteractive
-ENV LIBGL_ALWAYS_INDIRECT=1
-RUN echo "LC_ALL=en_US.UTF-8" >> /etc/environment
-
+# TileLang (non-editable, installed from builder wheel)
+# Runtime deps: tvm_ffi is required by the bundled TVM; z3-solver by TVM's solver
+COPY --from=builder-tilelang /tmp/tilelang-wheel/*.whl /tmp/wheels/
 RUN /bin/bash -lc 'set -euo pipefail; \
-  echo "[TileLang] Building TileLang for ${GPU_ARCH}"; \
-  # System dependencies (NO llvm-dev to avoid llvm-config-16 shadowing)
-  apt-get update && apt-get install -y --no-install-recommends \
-      build-essential git wget curl ca-certificates gnupg \
-      libgtest-dev libgmock-dev \
-      libprotobuf-dev protobuf-compiler libgflags-dev libsqlite3-dev \
-      python3 python3-dev python3-setuptools python3-pip python3-apt \
-      gcc libtinfo-dev zlib1g-dev libedit-dev libxml2-dev vim \
-      cmake ninja-build pkg-config libstdc++6 software-properties-common \
-  && rm -rf /var/lib/apt/lists/*; \
-  \
-  # Prefer the container venv
-  VENV_PY="/opt/venv/bin/python"; \
   VENV_PIP="/opt/venv/bin/pip"; \
-  if [ ! -x "$VENV_PY" ]; then VENV_PY="python3"; fi; \
   if [ ! -x "$VENV_PIP" ]; then VENV_PIP="pip3"; fi; \
-  \
-  # Build GoogleTest static libs (Ubuntu package ships sources only)
-  cmake -S /usr/src/googletest -B /tmp/build-gtest -DBUILD_GTEST=ON -DBUILD_GMOCK=ON -DCMAKE_BUILD_TYPE=Release && \
-  cmake --build /tmp/build-gtest -j"$(nproc)" && \
-  cp -v /tmp/build-gtest/lib/*.a /usr/lib/x86_64-linux-gnu/ && \
-  rm -rf /tmp/build-gtest; \
-  \
-  # Keep setuptools < 80 (compat with base image)
-  "$VENV_PIP" install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core && \
-  "$VENV_PIP" cache purge || true; \
-  \
-  # Locate ROCm llvm-config; fallback to installing LLVM 18 if missing
-  LLVM_CONFIG_PATH=""; \
-  for p in /opt/rocm/llvm/bin/llvm-config /opt/rocm/llvm-*/bin/llvm-config /opt/rocm-*/llvm*/bin/llvm-config; do \
-    if [ -x "$p" ]; then LLVM_CONFIG_PATH="$p"; break; fi; \
-  done; \
-  if [ -z "$LLVM_CONFIG_PATH" ]; then \
-    echo "[TileLang] ROCm llvm-config not found; installing LLVM 18..."; \
-    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /etc/apt/keyrings/llvm.gpg; \
-    echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" > /etc/apt/sources.list.d/llvm.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends llvm-18; \
-    rm -rf /var/lib/apt/lists/*; \
-    LLVM_CONFIG_PATH="$(command -v llvm-config-18)"; \
-    if [ -z "$LLVM_CONFIG_PATH" ]; then echo "ERROR: llvm-config-18 not found after install"; exit 1; fi; \
-  fi; \
-  echo "[TileLang] Using LLVM_CONFIG at: $LLVM_CONFIG_PATH"; \
-  export PATH="$(dirname "$LLVM_CONFIG_PATH"):/usr/local/bin:${PATH}"; \
-  export LLVM_CONFIG="$LLVM_CONFIG_PATH"; \
-  \
-  # Optional shim for tools that expect llvm-config-16
-  mkdir -p /usr/local/bin && \
-  printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16 && \
-  chmod +x /usr/local/bin/llvm-config-16; \
-  \
-  # TVM Python bits need Cython + z3 before configure.
-  # Pin z3-solver==4.15.4.0: 4.15.4.0 has a manylinux wheel; 4.15.5.0 has no wheel and builds from source (fails: C++20 <format> needs GCC 14+, image has GCC 11).
-  "$VENV_PIP" install --no-cache-dir "cython>=0.29.36,<3.0" "apache-tvm-ffi @ git+https://github.com/apache/tvm-ffi.git@37d0485b2058885bf4e7a486f7d7b2174a8ac1ce" "z3-solver==4.15.4.0"; \
-  \
-  # Clone + pin TileLang (bundled TVM), then build
-  git clone --recursive "${TILELANG_REPO}" /opt/tilelang && \
-  cd /opt/tilelang && \
-  git fetch --depth=1 origin "${TILELANG_COMMIT}" || true && \
-  git checkout -f "${TILELANG_COMMIT}" && \
-  git submodule update --init --recursive && \
-  export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG} -DSKBUILD_SABI_VERSION= ${CMAKE_ARGS:-}" && \
-  "$VENV_PIP" install -e . -v --no-build-isolation --no-deps; \
-  if [ -f pyproject.toml ]; then sed -i "/^[[:space:]]*\"torch/d" pyproject.toml || true; fi; \
-  "$VENV_PIP" cache purge || true; \
+  "$VENV_PIP" install --no-cache-dir \
+    "apache-tvm-ffi @ git+https://github.com/apache/tvm-ffi.git@37d0485b2058885bf4e7a486f7d7b2174a8ac1ce" \
+    "z3-solver==4.15.4.0" \
+  && "$VENV_PIP" install --no-cache-dir --no-deps --force-reinstall /tmp/wheels/*.whl \
+  && rm -rf /tmp/wheels; \
+  VENV_PY="/opt/venv/bin/python"; \
+  if [ ! -x "$VENV_PY" ]; then VENV_PY="python3"; fi; \
   "$VENV_PY" -c "import tilelang; print(tilelang.__version__)"'
 
 # -----------------------
-# Hadamard-transform (HIP build)
-RUN /bin/bash -lc 'set -euo pipefail; \
-    git clone --branch "${FHT_BRANCH}" "${FHT_REPO}" fast-hadamard-transform; \
-    cd fast-hadamard-transform; \
-    git checkout -f "${FHT_COMMIT}"; \
-    python setup.py install'
+# Install FHT wheel from builder stage (source never enters final image)
+COPY --from=builder-fht /tmp/fht-wheel/*.whl /tmp/wheels/
+RUN pip install --no-cache-dir --force-reinstall /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels
 
 # -----------------------
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     py-spy \
-    pre-commit \
     tabulate
 
 # -----------------------
@@ -422,12 +486,6 @@ RUN /bin/bash -lc 'set -euo pipefail; \
       ; \
       rm -rf /var/lib/apt/lists/*; \
       ;; \
-    # TODO: Add Broadcom bnxt packages/repos here later.
-    # bnxt) \
-    #   export USE_IONIC="OFF"; \
-    #   export USE_BNXT="ON"; \
-    #   echo "[MORI] NIC_BACKEND=bnxt: USE_BNXT=ON. Add Broadcom bnxt packages/repos here later."; \
-    #   ;; \
     *) \
       echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic"; \
       exit 2; \
@@ -442,20 +500,22 @@ RUN /bin/bash -lc 'set -euo pipefail; \
   cd /sgl-workspace/mori; \
   git checkout "${MORI_COMMIT}"; \
   git submodule update --init --recursive; \
+  git fetch --depth 1 origin $(git rev-parse HEAD) 2>/dev/null || true; \
+  git reflog expire --expire=now --all && git gc --prune=now; \
   python3 setup.py develop; \
   python3 -c "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))" > /etc/ld.so.conf.d/torch.conf; \
   ldconfig; \
   echo "export PYTHONPATH=/sgl-workspace/mori:\${PYTHONPATH}" >> /etc/bash.bashrc; \
+  find /sgl-workspace/mori -name "*.o" -delete 2>/dev/null || true; \
   echo "[MORI] Done."'
 
 # -----------------------
 # Hot patch: torch-ROCm
 # The artifact hardcoded the supported triton version to be 3.5.1.
 # Rewrite the restriction directly.
+# Combined into single layer to avoid the 3.3 GB extracted wheel lingering in a prior layer
 ARG TORCH_ROCM_FILE="torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cp310-cp310-linux_x86_64.whl"
-RUN mkdir /tmp/whl && cd /tmp/whl \
-     && export TORCH_ROCM_FILE="${TORCH_ROCM_FILE}" \
-     && cat > hack.py <<"PY"
+RUN mkdir -p /tmp/whl && cat > /tmp/whl/hack.py <<"PY"
 import zipfile, csv, os, re
 from pathlib import Path
 
@@ -502,35 +562,36 @@ with zipfile.ZipFile(out_whl, "w", compression=zipfile.ZIP_DEFLATED) as z:
 print("Wrote", out_whl)
 PY
 
-RUN cd /tmp/whl \
-    && case "${GPU_ARCH}" in \
+RUN set -eux; \
+    case "${GPU_ARCH}" in \
       *rocm720*) \
         echo "ROCm 7.2 flavor detected from GPU_ARCH=${GPU_ARCH}"; \
-        python hack.py \
+        cd /tmp/whl \
+        && export TORCH_ROCM_FILE="${TORCH_ROCM_FILE}" \
+        && python hack.py \
         && python3 -m pip install --force --no-deps /tmp/${TORCH_ROCM_FILE} \
-        && rm -fr /tmp/whl /tmp/${TORCH_ROCM_FILE} \
+        && rm -rf /tmp/whl /tmp/${TORCH_ROCM_FILE}; \
         ;; \
       *) \
         echo "Not rocm720 (GPU_ARCH=${GPU_ARCH}), skip patch"; \
+        rm -rf /tmp/whl; \
         ;; \
     esac
 
 
 # -----------------------
-# Hot patch: Triton
+# Triton (non-editable, installed from builder wheel)
 # For ROCm 7.2, this custom build breaks pip dependency management,
 # so future `pip install` will break the ROCm stack.
 # A workaround for this is to reinstall the default triton
 # wheel with the `rocm/pytorch` image in the root directory.
-RUN if [ "$BUILD_TRITON" = "1" ]; then \
+COPY --from=builder-triton /tmp/triton-wheel/ /tmp/triton-wheel/
+RUN set -eux; \
+    if ls /tmp/triton-wheel/*.whl 1>/dev/null 2>&1; then \
         pip uninstall -y triton \
-     && apt install -y cmake \
-     && git clone ${TRITON_REPO} triton-custom \
-     && cd triton-custom \
-     && git checkout ${TRITON_COMMIT} \
-     && pip install -r python/requirements.txt \
-     && pip install -e .; \
-    fi
+     && pip install --no-cache-dir --force-reinstall /tmp/triton-wheel/*.whl; \
+    fi; \
+    rm -rf /tmp/triton-wheel
 
 # -----------------------
 # Performance environment variable.
