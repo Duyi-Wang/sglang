@@ -1511,7 +1511,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             loop.create_task(print_exception_wrapper(self.sigterm_watchdog))
         )
 
-    _BATCH_NOTIFY_SIZE = 16
+    _BATCH_NOTIFY_SIZE = 128
 
     async def handle_loop(self):
         """The event loop that handles requests"""

@@ -976,7 +976,7 @@ class SchedulerOutputProcessorMixin:
                         now = time.monotonic()
                         last_t = getattr(req, '_last_stream_time', 0.0)
                         is_first = len(req.output_ids) == 1
-                        should_output = is_first or (now - last_t >= 0.05)
+                        should_output = is_first or (now - last_t >= 0.1)
                         if should_output:
                             req._last_stream_time = now
 

@@ -123,7 +123,20 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
         self.is_dummy = False
         self.is_tool_call_parser_gpt_oss = server_args.tool_call_parser == "gpt-oss"
         self.disable_tokenizer_batch_decode = server_args.disable_tokenizer_batch_decode
-        self._decode_pool = ThreadPoolExecutor(max_workers=2)
+        self._decode_pool = ThreadPoolExecutor(max_workers=4)
+
+        # Pre-compute single-token decode cache to bypass batch_decode hot path
+        self._token_cache = {}
+        if self.tokenizer is not None and not self.disable_tokenizer_batch_decode:
+            try:
+                vocab_size = getattr(self.tokenizer, "vocab_size", 0) or len(self.tokenizer)
+                all_ids = [[i] for i in range(vocab_size)]
+                all_texts = self.tokenizer.batch_decode(all_ids, skip_special_tokens=True)
+                for tid, text in enumerate(all_texts):
+                    self._token_cache[tid] = text
+                logger.info(f"Detokenizer: built single-token cache for {len(self._token_cache)} tokens")
+            except Exception as e:
+                logger.warning(f"Detokenizer: failed to build token cache: {e}")
 
         self.soft_watchdog = Watchdog.create(
             debug_name="DetokenizerManager",
@@ -263,20 +276,50 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
 
         if not self.disable_tokenizer_batch_decode:
             if not self.is_dummy:
-                surr_future = self._decode_pool.submit(
-                    self._grouped_batch_decode,
-                    surr_ids,
-                    recv_obj.skip_special_tokens,
-                    recv_obj.spaces_between_special_tokens,
-                )
-                read_future = self._decode_pool.submit(
-                    self._grouped_batch_decode,
-                    read_ids,
-                    recv_obj.skip_special_tokens,
-                    recv_obj.spaces_between_special_tokens,
-                )
-                surr_texts = surr_future.result()
-                read_texts = read_future.result()
+                # Fast path: skip batch_decode for empty surr_ids and cached single-token read_ids
+                surr_texts = [None] * bs
+                read_texts = [None] * bs
+                slow_surr_idx, slow_surr_data = [], []
+                slow_read_idx, slow_read_data = [], []
+                slow_read_skip, slow_read_space = [], []
+
+                for i in range(bs):
+                    if len(surr_ids[i]) == 0:
+                        surr_texts[i] = ""
+                    else:
+                        slow_surr_idx.append(i)
+                        slow_surr_data.append(surr_ids[i])
+
+                    if (len(read_ids[i]) == 1
+                            and read_ids[i][0] in self._token_cache
+                            and recv_obj.skip_special_tokens[i]):
+                        read_texts[i] = self._token_cache[read_ids[i][0]]
+                    else:
+                        slow_read_idx.append(i)
+                        slow_read_data.append(read_ids[i])
+                        slow_read_skip.append(recv_obj.skip_special_tokens[i])
+                        slow_read_space.append(recv_obj.spaces_between_special_tokens[i])
+
+                # Only batch_decode uncached items (typically <10% of batch)
+                if slow_surr_idx and slow_read_idx:
+                    slow_surr_skip = [recv_obj.skip_special_tokens[j] for j in slow_surr_idx]
+                    slow_surr_space = [recv_obj.spaces_between_special_tokens[j] for j in slow_surr_idx]
+                    sf = self._decode_pool.submit(self._grouped_batch_decode, slow_surr_data, slow_surr_skip, slow_surr_space)
+                    rf = self._decode_pool.submit(self._grouped_batch_decode, slow_read_data, slow_read_skip, slow_read_space)
+                    for j, idx in enumerate(slow_surr_idx):
+                        surr_texts[idx] = sf.result()[j]
+                    for j, idx in enumerate(slow_read_idx):
+                        read_texts[idx] = rf.result()[j]
+                elif slow_surr_idx:
+                    slow_surr_skip = [recv_obj.skip_special_tokens[j] for j in slow_surr_idx]
+                    slow_surr_space = [recv_obj.spaces_between_special_tokens[j] for j in slow_surr_idx]
+                    decoded = self._grouped_batch_decode(slow_surr_data, slow_surr_skip, slow_surr_space)
+                    for j, idx in enumerate(slow_surr_idx):
+                        surr_texts[idx] = decoded[j]
+                elif slow_read_idx:
+                    decoded = self._grouped_batch_decode(slow_read_data, slow_read_skip, slow_read_space)
+                    for j, idx in enumerate(slow_read_idx):
+                        read_texts[idx] = decoded[j]
             else:
                 surr_texts = ["dog" for _ in surr_ids]
                 read_texts = ["cat" for _ in read_ids]
