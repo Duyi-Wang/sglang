@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
@@ -964,16 +965,22 @@ class SchedulerOutputProcessorMixin:
                         req.sampling_params.stream_interval or self.stream_interval
                     )
 
-                    # origin stream_interval logic
-                    should_output = (
-                        len(req.output_ids) % stream_interval == 1
-                        if not self.model_config.is_multimodal_gen
-                        and stream_interval > 1
-                        else len(req.output_ids) % stream_interval == 0
-                    )
+                    if stream_interval > 1:
+                        should_output = (
+                            len(req.output_ids) % stream_interval == 1
+                            if not self.model_config.is_multimodal_gen
+                            else len(req.output_ids) % stream_interval == 0
+                        )
+                    else:
+                        # Time-based adaptive streaming: at most once per 50ms
+                        now = time.monotonic()
+                        last_t = getattr(req, '_last_stream_time', 0.0)
+                        is_first = len(req.output_ids) == 1
+                        should_output = is_first or (now - last_t >= 0.05)
+                        if should_output:
+                            req._last_stream_time = now
 
                     if should_output:
-                        # check_match_stop_str_prefix if  tail_str's suffix match stop_str prefix
                         should_output &= not req.check_match_stop_str_prefix()
                 else:
                     should_output = (
@@ -1120,8 +1127,8 @@ class SchedulerOutputProcessorMixin:
 
         dp_ranks = [self.dp_rank] * len(rids) if rids else None
 
-        # Send to detokenizer
-        if reqs or is_idle_batch:
+        # Send to detokenizer - skip when nothing to send
+        if rids or is_idle_batch:
             if self.model_config.is_multimodal_gen:
                 return
             self.send_to_detokenizer.send_output(

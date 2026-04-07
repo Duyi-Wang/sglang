@@ -148,8 +148,17 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             with self.soft_watchdog.disable():
                 recv_obj = self.recv_from_scheduler.recv_pyobj()
             output = self._request_dispatcher(recv_obj)
-            if output is not None:
-                self.send_to_tokenizer.send_pyobj(output)
+            pending = [output] if output is not None else []
+            while True:
+                try:
+                    extra = self.recv_from_scheduler.recv_pyobj(zmq.NOBLOCK)
+                    extra_out = self._request_dispatcher(extra)
+                    if extra_out is not None:
+                        pending.append(extra_out)
+                except zmq.Again:
+                    break
+            for p in pending:
+                self.send_to_tokenizer.send_pyobj(p)
             self.soft_watchdog.feed()
 
     def trim_matched_stop(
