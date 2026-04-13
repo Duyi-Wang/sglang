@@ -1628,7 +1628,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 recv_obj = await self.recv_from_detokenizer.recv_pyobj()
             if isinstance(
                 recv_obj,
-                (BatchStrOutput, BatchEmbeddingOutput, BatchTokenIDOutput, BatchMultimodalOutput),
+                (BatchStrOutput, BatchEmbeddingOutput, BatchTokenIDOutput),
             ):
                 await self._handle_batch_output(recv_obj)
             else:
