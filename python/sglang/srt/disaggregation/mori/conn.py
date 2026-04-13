@@ -267,8 +267,8 @@ class MoriKVManager(CommonKVManager):
 
         # Number of RDMA Queue Pairs (QPs) used per transfer operation.
         # Higher values can increase parallelism and bandwidth utilization.
-        # Default: 1
-        qp_per_transfer = get_int_env_var("SGLANG_MORI_QP_PER_TRANSFER", 1)
+        # Default: 4
+        qp_per_transfer = get_int_env_var("SGLANG_MORI_QP_PER_TRANSFER", 4)
 
         # Number of RDMA work requests posted in a single batch to each QP.
         # Larger batch sizes reduce per-operation overhead and improve throughput
@@ -281,8 +281,8 @@ class MoriKVManager(CommonKVManager):
         # Each worker handles RDMA operations on a separate CPU core (with affinity).
         # More workers can improve parallelism for large batch transfers across
         # multiple QPs, but excessive threads may cause contention.
-        # Default: 1
-        num_worker_threads = get_int_env_var("SGLANG_MORI_NUM_WORKERS", 1)
+        # Default: 4
+        num_worker_threads = get_int_env_var("SGLANG_MORI_NUM_WORKERS", 4)
 
         rdma_cfg = RdmaBackendConfig(
             qp_per_transfer,
