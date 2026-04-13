@@ -486,7 +486,11 @@ class MoriKVManager(CommonKVManager):
                         room_infos[room], room, KVPoll.Failed, reason
                     )
                 elif not success or has_transfer_error:
-                    reason = self._collect_status_failure_reason(all_statuses)
+                    with self.failure_lock:
+                        recorded_reason = self.failure_records.get(room)
+                    reason = recorded_reason or self._collect_status_failure_reason(
+                        all_statuses
+                    )
                     self.record_failure(room, reason)
                     self.update_status(room, KVPoll.Failed)
                     self.notify_decode_status(
@@ -553,6 +557,16 @@ class MoriKVManager(CommonKVManager):
             if room not in self.request_status:
                 return False  # Room cleared
             if time.time() > deadline:
+                in_progress = sum(1 for s in statuses if s.InProgress())
+                failed = sum(1 for s in statuses if s.Failed())
+                logger.warning(
+                    "RDMA completion timeout for room %s after %.1fs: total=%d in_progress=%d failed=%d",
+                    room,
+                    timeout,
+                    len(statuses),
+                    in_progress,
+                    failed,
+                )
                 self.record_failure(room, f"RDMA completion timeout after {timeout}s")
                 return False
             time.sleep(sleep_sec)  # releases GIL
