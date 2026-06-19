@@ -76,6 +76,11 @@ class AiterRunnerInput(RunnerInput):
     # Mori-only fused_moe kwargs.
     num_local_tokens: Optional[torch.Tensor] = None
     output_dtype: Optional[torch.dtype] = None
+    # Per-local-expert average load hint for mori_moe tile/tier selection.
+    # Host int (or None), computed in pre_permute from the *pre-dispatch* topk
+    # shape, so it is fixed per cuda-graph capture size and graph-safe (no
+    # device .item()). See _run_mori_moe / the per-capture-size design note.
+    expected_m: Optional[int] = None
 
     @property
     def runner_backend(self) -> MoeRunnerBackend:
@@ -119,6 +124,161 @@ def _aiter_fused_moe_supports_no_combine() -> bool:
     return "no_combine" in inspect.signature(fused_moe).parameters
 
 
+@functools.cache
+def _use_mori_moe() -> bool:
+    """Whether to route the AITER MoE runner through the standalone mori_moe
+    FlyDSL MXFP4 EP backend instead of ``aiter.fused_moe``.
+
+    Controlled by the ``SGLANG_USE_MORI_MOE`` env var, read once at first call
+    (startup-fixed -> graph-capture safe; the value cannot change between capture
+    and replay). When unset/false the runner is byte-for-byte the original aiter
+    path. ``PYTHONPATH`` must expose the ``mori_moe`` package.
+    """
+    if not get_bool_env_var("SGLANG_USE_MORI_MOE"):
+        return False
+    try:
+        import mori_moe  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "SGLANG_USE_MORI_MOE=1 but the mori_moe package is not importable. "
+            "Add it to PYTHONPATH (e.g. PYTHONPATH=/home/duwang/mori_moe)."
+        ) from e
+    return True
+
+
+# AITER -> mori_moe enum / dtype maps for the adapter.
+_MORI_ACTIVATIONS = {"silu": "Silu", "swiglu": "Swiglu"}
+
+
+def _run_mori_moe(
+    core: AiterRunnerCore,
+    runner_input: AiterRunnerInput,
+    quant_info: AiterMoeQuantInfo,
+) -> torch.Tensor:
+    """Adapter: run the AITER MoE call through ``mori_moe.fused_moe``.
+
+    mori_moe is EP-only / MXFP4-only (per_1x32). It reproduces the same
+    pipeline aiter.fused_moe runs for the DSV3 W4A4 fp4-dispatch hook, so the
+    arg translation is direct:
+
+      - ``topk_weight``        -> ``topk_weights``
+      - weights/scales already shuffled by quark (is_shuffled) -> pass
+        ``pre_shuffled=True`` so mori_moe does not re-shuffle.
+      - ``expert_mask`` present (EP) -> ``mode="reduce"`` (fused masked gather).
+      - fp4-dispatched activation (hidden_states is fp4x2 + a1_scale) -> pass
+        the pre-quantized ``a1_qt`` / ``a1_scale`` entry so mori_moe skips its
+        internal activation quant (matching how aiter consumes the dispatch).
+      - bf16 activation (a1_scale is None) -> mori_moe quantizes internally.
+      - ``intermediate_dtype="fp4"`` (DSV3 default).
+      - ``expected_m``: per-local-expert average load hint for tile/tier
+        selection. Taken from ``runner_input.expected_m`` (computed per
+        cuda-graph capture size in pre_permute from the pre-dispatch topk shape;
+        graph-safe host int), with the ``MORI_MOE_EXPECTED_M`` env var as an
+        override/fallback. NOTE: the per-capture-size path is NOT yet E2E
+        verified -- correctness/perf validation is deferred to a GPU run.
+      - ``num_local_tokens``: only forwarded when it is a host int. The mori
+        dispatch value is a device tensor whose value is unknown until the
+        dispatch kernel runs, and mori_moe's host-side slice would need a
+        ``.item()`` D2H sync that is illegal under graph capture; so under the
+        device-tensor case it is dropped (None -> process all rows, correct but
+        without the big-buffer fast path). See the go/no-go #2 note.
+    """
+    from mori_moe.dtypes import ActivationType as MoriActivationType
+    from mori_moe.dtypes import QuantType as MoriQuantType
+    from mori_moe.fused_moe import fused_moe as mori_fused_moe
+
+    hidden_states = runner_input.hidden_states
+    topk_ids = runner_input.topk_ids
+    topk_weights = runner_input.topk_weights
+
+    act_name = _MORI_ACTIVATIONS.get(core.config.activation, "Silu")
+    activation = getattr(MoriActivationType, act_name)
+
+    expert_mask = quant_info.expert_mask
+    # stage2 combine mode. Under EP the recv buffer is per-expert padded (valid
+    # tokens scattered), so the reduce path's num_valid front-packed early-exit
+    # does NOT apply -> moe_reduction_kernel scans the FULL padded buffer
+    # (~2.4ms/call, 68% of decode GPU time in profiling). atomic mode combines
+    # via atomicAdd over the sorted VALID slots (bounded by num_valid_ids), like
+    # aiter's atomic_sbm128 -> avoids the full-buffer reduce. Numerically
+    # matches reduce within MXFP4 noise (rel ~1%). Set MORI_MOE_FORCE_REDUCE=1
+    # to revert to the reduce path.
+    import os as _os2
+    if _os2.environ.get("MORI_MOE_FORCE_REDUCE") in ("1","true","True"):
+        mode = "reduce" if expert_mask is not None else "atomic"
+    else:
+        mode = "atomic"
+
+    # fp4-dispatch: hidden_states already quantized to fp4x2 + per-token scale.
+    a1_scale = (
+        runner_input.a1_scale
+        if runner_input.a1_scale is not None
+        else quant_info.a13_scale
+    )
+    is_fp4_dispatch = hidden_states.dtype == torch.float4_e2m1fn_x2
+    a1_qt_kw: dict = {}
+    if is_fp4_dispatch and a1_scale is not None:
+        a1_qt_kw["a1_qt"] = hidden_states
+        a1_qt_kw["a1_scale"] = a1_scale
+
+    # num_local_tokens: only a host int is graph-safe (see docstring / report).
+    nlt = runner_input.num_local_tokens
+    nlt_kw: dict = {}
+    if nlt is not None:
+        # host int -> front-slice; device tensor -> graph-safe in-kernel bound.
+        nlt_kw["num_local_tokens"] = nlt
+
+    # expected_m: host-int per-local-expert average load hint for tile/tier
+    # selection (graph-safe -- a fixed host int baked into the captured graph).
+    # The recv buffer M is the padded buffer size (e.g. 98304), so without this
+    # hint select_2stage_config maps to the 32768 prefill tier (absent from the
+    # CSV) and mori_moe falls back to oversized default tiles.
+    #
+    # Per-cuda-graph-capture-size value (mirrors how deepep/nixl compute their
+    # deepgemm expected_m): pre_permute derives runner_input.expected_m from the
+    # *pre-dispatch* topk shape (real per-rank batch B), which is fixed for each
+    # captured batch size -> a different, correctly-sized tier is baked into each
+    # captured graph instead of a single fixed 256.
+    #
+    #   expected_m = ceil(B * topk / num_local_experts)
+    #
+    # which equals deepep's ceil(B * world_size * topk / num_experts) since
+    # num_experts == num_local_experts * world_size (world_size cancels). For
+    # EP8/dp8 DSV3 (topk=8, num_local_experts=32) this is B/4.
+    #
+    # Env override MORI_MOE_EXPECTED_M wins when set (debug / pinning a tier);
+    # otherwise fall back to the per-size value, and finally to None (mori_moe
+    # caller default) if neither is available.
+    import os as _os
+    exp_m_kw: dict = {}
+    _exp_m_env = _os.environ.get("MORI_MOE_EXPECTED_M")
+    if _exp_m_env is not None and _exp_m_env != "":
+        exp_m_kw["expected_m"] = int(_exp_m_env)
+    elif runner_input.expected_m is not None:
+        exp_m_kw["expected_m"] = int(runner_input.expected_m)
+
+    return mori_fused_moe(
+        hidden_states,
+        quant_info.w13_weight,
+        quant_info.w2_weight,
+        topk_weights,
+        topk_ids,
+        w1_scale=quant_info.w13_scale,
+        w2_scale=quant_info.w2_scale,
+        quant_type=MoriQuantType.per_1x32,
+        activation=activation,
+        doweight_stage1=quant_info.doweight_stage1,
+        dtype=runner_input.output_dtype or hidden_states.dtype,
+        expert_mask=expert_mask,
+        pre_shuffled=True,
+        mode=mode,
+        intermediate_dtype="fp4",
+        **a1_qt_kw,
+        **nlt_kw,
+        **exp_m_kw,
+    )
+
+
 class AiterRunnerCore(MoeRunnerCore):
     def run(
         self,
@@ -144,6 +304,11 @@ class AiterRunnerCore(MoeRunnerCore):
                     )
                 )
             return AiterRunnerOutput(hidden_states=runner_input.hidden_states)
+
+        if _use_mori_moe():
+            return AiterRunnerOutput(
+                hidden_states=_run_mori_moe(self, runner_input, quant_info)
+            )
 
         from aiter.fused_moe import fused_moe
 
@@ -297,6 +462,7 @@ def _pre_permute_deepep_to_aiter(
     a1_scale: Optional[torch.Tensor] = None
     num_local_tokens: Optional[torch.Tensor] = None
     output_dtype: Optional[torch.dtype] = None
+    expected_m: Optional[int] = None
     quant_type = quant_info.quant_type
 
     if is_mori:
@@ -305,6 +471,22 @@ def _pre_permute_deepep_to_aiter(
         a1_scale = dispatch_output.hidden_states_scale
         num_local_tokens = dispatch_output.num_recv_tokens_per_expert
         output_dtype = dispatch_output.out_dtype
+
+        # Per-local-expert average load hint for mori_moe tile/tier selection,
+        # computed here (not in _run_mori_moe) because the *pre-dispatch* topk
+        # tensor -- whose row count is the real per-rank batch B -- is only in
+        # scope before permute. origin_topk_ids is that pre-dispatch topk
+        # (shape [B, topk]); its shape is fixed per cuda-graph capture size, so
+        # this is a host int known at capture time (no device .item(), so it is
+        # graph-safe). Mirrors deepep/nixl's expected_m, with world_size
+        # cancelled out: num_experts == num_local_experts * world_size, hence
+        #   ceil(B * world_size * topk / num_experts) == ceil(B * topk / nle).
+        origin_topk_ids = dispatch_output.origin_topk_ids
+        nle = runner_config.num_local_experts
+        if origin_topk_ids is not None and nle:
+            B = int(origin_topk_ids.shape[0])
+            topk = int(origin_topk_ids.shape[1])
+            expected_m = (B * topk + nle - 1) // nle
 
         # Truncate dispatch tensors to the configured cap; mori combine only
         # reads [0, totalRecvTokenNum), so the truncated result needs no
@@ -388,6 +570,7 @@ def _pre_permute_deepep_to_aiter(
         a1_scale=a1_scale,
         num_local_tokens=num_local_tokens,
         output_dtype=output_dtype,
+        expected_m=expected_m,
     )
 
 
