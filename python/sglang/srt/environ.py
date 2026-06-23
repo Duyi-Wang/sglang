@@ -474,6 +474,20 @@ class Envs:
     # Enable dual-stream MoE (shared experts vs routed experts) on the
     # ROCm/AITER path. Requires GPU_MAX_HW_QUEUES>=5 to avoid HW-queue serialization.
     SGLANG_ROCM_USE_MULTI_STREAM = EnvBool(False)
+    # Route the AITER MoE runner through the standalone mori_moe FlyDSL MXFP4 EP
+    # backend instead of aiter.fused_moe. Read once at first call (startup-fixed
+    # -> CUDA-graph safe). mori_moe is EP-only / MXFP4 (per_1x32); unsupported
+    # quant types fall back to aiter.fused_moe. Requires the mori_moe package on
+    # PYTHONPATH.
+    SGLANG_USE_MORI_MOE = EnvBool(False)
+    # Expert override for the mori_moe per-local-expert load hint (tile/tier
+    # selection). None -> use the per-cuda-graph-capture value derived from the
+    # pre-dispatch topk shape in pre_permute.
+    SGLANG_MORI_MOE_EXPECTED_M = EnvInt(None)
+    # Debug: force mori_moe stage2 combine to the legacy "reduce" mode under EP
+    # instead of the default "atomic" mode. "reduce" scans the full padded recv
+    # buffer (~3x slower under real EP padding); only for A/B numerics checks.
+    SGLANG_MORI_MOE_FORCE_REDUCE = EnvBool(False)
 
     # MPS (Apple Silicon)
     SGLANG_USE_MLX = EnvBool(False)

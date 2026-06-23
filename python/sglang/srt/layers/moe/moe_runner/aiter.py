@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -19,6 +20,8 @@ from sglang.srt.layers.moe.moe_runner.base import (
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.utils import get_bool_env_var, get_int_env_var
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher.base import CombineInput
@@ -76,6 +79,9 @@ class AiterRunnerInput(RunnerInput):
     # Mori-only fused_moe kwargs.
     num_local_tokens: Optional[torch.Tensor] = None
     output_dtype: Optional[torch.dtype] = None
+    # mori_moe per-local-expert load hint (host int, graph-safe). Computed in
+    # pre_permute from the pre-dispatch topk shape; consumed by _run_mori_moe.
+    expected_m: Optional[int] = None
 
     @property
     def runner_backend(self) -> MoeRunnerBackend:
@@ -119,6 +125,135 @@ def _aiter_fused_moe_supports_no_combine() -> bool:
     return "no_combine" in inspect.signature(fused_moe).parameters
 
 
+@functools.cache
+def _use_mori_moe() -> bool:
+    """Whether to route the AITER MoE runner through the standalone mori_moe
+    FlyDSL MXFP4 EP backend instead of ``aiter.fused_moe``.
+
+    Controlled by ``SGLANG_USE_MORI_MOE``, read once at first call (startup-fixed
+    -> CUDA-graph safe; the value cannot change between capture and replay). When
+    unset/false the runner is byte-for-byte the original aiter path. The
+    ``mori_moe`` package must be importable (e.g. on ``PYTHONPATH``).
+    """
+    from sglang.srt.environ import envs
+
+    if not envs.SGLANG_USE_MORI_MOE.get():
+        return False
+    try:
+        import mori_moe  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "SGLANG_USE_MORI_MOE=1 but the mori_moe package is not importable. "
+            "Install it or add it to PYTHONPATH (e.g. PYTHONPATH=/path/to/mori_moe)."
+        ) from e
+    return True
+
+
+def _mori_moe_supported(
+    runner_input: AiterRunnerInput, quant_info: AiterMoeQuantInfo
+) -> bool:
+    """mori_moe is EP-only / MXFP4 (per_1x32). Anything else falls back to
+    aiter.fused_moe so the switch is safe to flip globally."""
+    return (
+        runner_input.quant_type == AiterQuantType.PER_1X32
+        and quant_info.expert_mask is not None
+    )
+
+
+@functools.cache
+def _warn_mori_unsupported_once(quant_type_value: str) -> None:
+    logger.warning(
+        "SGLANG_USE_MORI_MOE=1 but this MoE call (quant_type=%s, expert_mask "
+        "present check failed) is unsupported by mori_moe (per_1x32 / EP only); "
+        "falling back to aiter.fused_moe.",
+        quant_type_value,
+    )
+
+
+def _run_mori_moe(
+    core: AiterRunnerCore,
+    runner_input: AiterRunnerInput,
+    quant_info: AiterMoeQuantInfo,
+) -> torch.Tensor:
+    """Adapter: run the AITER MoE call through ``mori_moe.fused_moe``.
+
+    mori_moe is EP-only / MXFP4 (per_1x32). It reproduces the same pipeline
+    aiter.fused_moe runs for the DSV3 W4A4 fp4-dispatch hook, so the arg
+    translation is direct:
+
+      - weights/scales are already shuffled by quark -> ``pre_shuffled=True``.
+      - ``mode="atomic"`` (default): stage2 combines via atomicAdd over the
+        sorted VALID slots (bounded by num_valid), avoiding the full padded-buffer
+        scan that the legacy "reduce" mode does. ``SGLANG_MORI_MOE_FORCE_REDUCE``
+        reverts to reduce for A/B numerics checks.
+      - fp4-dispatched activation (hidden_states is fp4x2 + a1_scale) -> pass the
+        pre-quantized ``a1_qt`` / ``a1_scale`` so mori_moe skips its internal
+        activation quant; bf16 activation -> mori_moe quantizes internally.
+      - ``expected_m``: per-local-expert load hint for tile/tier selection.
+        ``SGLANG_MORI_MOE_EXPECTED_M`` overrides; otherwise the per-capture-size
+        value from ``runner_input.expected_m`` (graph-safe host int).
+      - ``num_local_tokens``: forwarded only when a host int. The mori dispatch
+        value is a device tensor whose host slice would need a ``.item()`` D2H
+        sync that is illegal under graph capture, so it is dropped there (None ->
+        process all rows; correct but without the big-buffer fast path).
+    """
+    from mori_moe.dtypes import ActivationType as MoriActivationType
+    from mori_moe.dtypes import QuantType as MoriQuantType
+    from mori_moe.fused_moe import fused_moe as mori_fused_moe
+
+    from sglang.srt.environ import envs
+
+    hidden_states = runner_input.hidden_states
+    activation = getattr(
+        MoriActivationType, _AITER_ACTIVATIONS.get(core.config.activation, "Silu")
+    )
+    expert_mask = quant_info.expert_mask
+
+    # stage2 combine mode (see docstring).
+    mode = "reduce" if envs.SGLANG_MORI_MOE_FORCE_REDUCE.get() else "atomic"
+
+    # fp4-dispatch: hidden_states already quantized to fp4x2 + per-token scale.
+    a1_scale = (
+        runner_input.a1_scale
+        if runner_input.a1_scale is not None
+        else quant_info.a13_scale
+    )
+    extra: dict = {}
+    if hidden_states.dtype == torch.float4_e2m1fn_x2 and a1_scale is not None:
+        extra["a1_qt"] = hidden_states
+        extra["a1_scale"] = a1_scale
+
+    # num_local_tokens: only a host int is graph-safe.
+    if runner_input.num_local_tokens is not None:
+        extra["num_local_tokens"] = runner_input.num_local_tokens
+
+    # expected_m: env override wins, else per-capture-size value from pre_permute.
+    expected_m = envs.SGLANG_MORI_MOE_EXPECTED_M.get()
+    if expected_m is None:
+        expected_m = runner_input.expected_m
+    if expected_m is not None:
+        extra["expected_m"] = int(expected_m)
+
+    return mori_fused_moe(
+        hidden_states,
+        quant_info.w13_weight,
+        quant_info.w2_weight,
+        runner_input.topk_weights,
+        runner_input.topk_ids,
+        w1_scale=quant_info.w13_scale,
+        w2_scale=quant_info.w2_scale,
+        quant_type=MoriQuantType.per_1x32,
+        activation=activation,
+        doweight_stage1=quant_info.doweight_stage1,
+        dtype=runner_input.output_dtype or hidden_states.dtype,
+        expert_mask=expert_mask,
+        pre_shuffled=True,
+        mode=mode,
+        intermediate_dtype="fp4",
+        **extra,
+    )
+
+
 class AiterRunnerCore(MoeRunnerCore):
     def run(
         self,
@@ -144,6 +279,13 @@ class AiterRunnerCore(MoeRunnerCore):
                     )
                 )
             return AiterRunnerOutput(hidden_states=runner_input.hidden_states)
+
+        if _use_mori_moe():
+            if _mori_moe_supported(runner_input, quant_info):
+                return AiterRunnerOutput(
+                    hidden_states=_run_mori_moe(self, runner_input, quant_info)
+                )
+            _warn_mori_unsupported_once(runner_input.quant_type.value)
 
         from aiter.fused_moe import fused_moe
 
@@ -297,6 +439,7 @@ def _pre_permute_deepep_to_aiter(
     a1_scale: Optional[torch.Tensor] = None
     num_local_tokens: Optional[torch.Tensor] = None
     output_dtype: Optional[torch.dtype] = None
+    expected_m: Optional[int] = None
     quant_type = quant_info.quant_type
 
     if is_mori:
@@ -305,6 +448,20 @@ def _pre_permute_deepep_to_aiter(
         a1_scale = dispatch_output.hidden_states_scale
         num_local_tokens = dispatch_output.num_recv_tokens_per_expert
         output_dtype = dispatch_output.out_dtype
+
+        # Per-local-expert average load hint for mori_moe tile/tier selection,
+        # computed here (not in _run_mori_moe) because the *pre-dispatch* topk
+        # tensor -- whose row count is the real per-rank batch B -- is only in
+        # scope before permute. origin_topk_ids (shape [B, topk]) is fixed per
+        # cuda-graph capture size, so this is a host int known at capture time
+        # (no device .item(), graph-safe). world_size cancels out:
+        #   ceil(B * world_size * topk / num_experts) == ceil(B * topk / nle).
+        origin_topk_ids = dispatch_output.origin_topk_ids
+        nle = runner_config.num_local_experts
+        if origin_topk_ids is not None and nle:
+            B = int(origin_topk_ids.shape[0])
+            topk = int(origin_topk_ids.shape[1])
+            expected_m = (B * topk + nle - 1) // nle
 
         # Truncate dispatch tensors to the configured cap; mori combine only
         # reads [0, totalRecvTokenNum), so the truncated result needs no
@@ -388,6 +545,7 @@ def _pre_permute_deepep_to_aiter(
         a1_scale=a1_scale,
         num_local_tokens=num_local_tokens,
         output_dtype=output_dtype,
+        expected_m=expected_m,
     )
 
 
