@@ -241,12 +241,12 @@ RUN --mount=type=secret,id=gh_token,required=false \
       GH_TOKEN=$(cat /run/secrets/gh_token); \
       git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"; \
     fi \
- && git clone ${AITER_REPO} \
+ && git clone ${AITER_REPO} aiter \
  && cd aiter \
  && git checkout -f ${AITER_COMMIT} \
  && git submodule update --init --recursive \
  && pip install -r requirements.txt \
- && git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true
+ && { git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true; }
 
 RUN cd aiter \
      && echo "[AITER] GPU_ARCH=${GPU_ARCH}" \
@@ -335,7 +335,7 @@ RUN --mount=type=secret,id=gh_token,required=false \
             fi \
          && cd ..; \
        fi \
-    && git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true \
+    && { git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true; } \
     && rm -rf /tmp/local_src \
     && cd sglang \
     && cd sgl-kernel \
