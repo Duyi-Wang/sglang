@@ -231,11 +231,22 @@ RUN pip uninstall -y aiter
 # block switching to commits that predate that rule (e.g. the current default
 # AITER_COMMIT_DEFAULT). The working tree was just produced by a fresh
 # `git clone` above, so there are no real user changes to preserve.
-RUN git clone ${AITER_REPO} \
+# Private-repo support: mount a GitHub token via BuildKit secret (id=gh_token).
+# When no secret is passed (public builds) the guard is skipped and clone stays
+# anonymous. The token is applied via url.insteadOf so it never lands in the
+# cloned repo's .git/config, and the global config section is removed at the end
+# of the same RUN so no token is committed to any image layer.
+RUN --mount=type=secret,id=gh_token,required=false \
+    if [ -s /run/secrets/gh_token ]; then \
+      GH_TOKEN=$(cat /run/secrets/gh_token); \
+      git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    fi \
+ && git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout -f ${AITER_COMMIT} \
  && git submodule update --init --recursive \
- && pip install -r requirements.txt
+ && pip install -r requirements.txt \
+ && git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true
 
 RUN cd aiter \
      && echo "[AITER] GPU_ARCH=${GPU_ARCH}" \
@@ -300,7 +311,16 @@ RUN pip uninstall -y sgl_kernel sglang
 
 # Obtain sglang source: copied from the build context (BRANCH_TYPE=local) or git clone.
 COPY --from=local_src /src /tmp/local_src
-RUN if [ "$BRANCH_TYPE" = "local" ]; then \
+# Private-repo support: same BuildKit secret (id=gh_token) as the aiter clone.
+# No effect on BRANCH_TYPE=local or on public clones (guard skipped when the
+# secret is absent). Token applied via url.insteadOf and stripped at RUN end so
+# it is never committed to a layer.
+RUN --mount=type=secret,id=gh_token,required=false \
+    if [ -s /run/secrets/gh_token ]; then \
+      GH_TOKEN=$(cat /run/secrets/gh_token); \
+      git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    fi \
+ && if [ "$BRANCH_TYPE" = "local" ]; then \
          echo "Using local source (BRANCH_TYPE=local)."; \
          cp -r /tmp/local_src sglang; \
        else \
@@ -315,6 +335,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
             fi \
          && cd ..; \
        fi \
+    && git config --global --remove-section url."https://x-access-token:${GH_TOKEN:-none}@github.com/" 2>/dev/null || true \
     && rm -rf /tmp/local_src \
     && cd sglang \
     && cd sgl-kernel \
