@@ -13,6 +13,7 @@
 # ==============================================================================
 """Tokenizer loading utilities."""
 
+import importlib
 import json
 import logging
 import warnings
@@ -446,25 +447,40 @@ def _apply_post_load_fixes(tokenizer, tokenizer_name, revision):
 # ---------------------------------------------------------------------------
 
 
-_fastokens_patched = False
+# Backends that work by monkey-patching transformers' fast-tokenizer backend
+# rather than by being a tokenizer class of their own. Each entry maps the
+# --tokenizer-backend value to (import name, docs URL); every one of them
+# exposes a module-level `patch_transformers()`.
+_PATCHING_BACKENDS = {
+    "fastokens": ("fastokens", "https://github.com/crusoecloud/fastokens"),
+    "deltatok": ("deltatok", "https://github.com/Duyi-Wang/DeltaTok"),
+}
+
+_patched_backends = set()
+
+
+def _ensure_backend_patched(backend: str):
+    """Monkey-patch transformers to use `backend` for tokenization (once)."""
+    if backend not in _PATCHING_BACKENDS or backend in _patched_backends:
+        return
+    module_name, docs_url = _PATCHING_BACKENDS[backend]
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        raise ImportError(
+            f"The {module_name} package is required when "
+            f"--tokenizer-backend={backend}. "
+            f"See {docs_url} for installation instructions."
+        ) from None
+
+    module.patch_transformers()
+    _patched_backends.add(backend)
+    logger.info("%s backend enabled - transformers patched successfully", backend)
 
 
 def _ensure_fastokens_patched():
-    """Monkey-patch transformers to use the fastokens backend (once)."""
-    global _fastokens_patched
-    if _fastokens_patched:
-        return
-    try:
-        import fastokens
-    except ImportError:
-        raise ImportError(
-            "The fastokens package is required when --tokenizer-backend=fastokens. "
-            "Install it with: pip install 'sglang[fastokens]'"
-        ) from None
-
-    fastokens.patch_transformers()
-    _fastokens_patched = True
-    logger.info("fastokens backend enabled - transformers patched successfully")
+    """Back-compat alias; prefer `_ensure_backend_patched`."""
+    _ensure_backend_patched("fastokens")
 
 
 def get_tokenizer(
@@ -477,14 +493,13 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
-    # Tiktoken format has its own backend — no fastokens patching needed.
+    # Tiktoken format has its own backend — no patching needed.
     if tokenizer_name.endswith(".json"):
         from sglang.srt.tokenizer.tiktoken_tokenizer import TiktokenTokenizer
 
         return TiktokenTokenizer(tokenizer_name)
 
-    if tokenizer_backend == "fastokens":
-        _ensure_fastokens_patched()
+    _ensure_backend_patched(tokenizer_backend)
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
@@ -539,12 +554,13 @@ def get_tokenizer(
                 tokenizer_name, *args, **common_kwargs
             )
 
-            # With fastokens, the patched TokenizersBackend.from_pretrained already
-            # returned a tokenizer whose backend is a fastokens shim. Re-resolving via
-            # the declared class (e.g. Qwen2Tokenizer) would discard that work.
+            # With a patching backend, the patched TokenizersBackend.from_pretrained
+            # already returned a tokenizer whose backend is that library's shim.
+            # Re-resolving via the declared class (e.g. Qwen2Tokenizer) would
+            # discard that work.
             if (
                 type(tokenizer).__name__ == _TOKENIZERS_BACKEND
-                and tokenizer_backend != "fastokens"
+                and tokenizer_backend not in _PATCHING_BACKENDS
             ):
                 tokenizer = _resolve_tokenizers_backend(
                     tokenizer_name, *args, **common_kwargs
@@ -552,12 +568,14 @@ def get_tokenizer(
 
         return _apply_post_load_fixes(tokenizer, tokenizer_name, tokenizer_revision)
     except Exception as e:
-        if tokenizer_backend == "fastokens":
+        if tokenizer_backend in _PATCHING_BACKENDS:
+            module_name, docs_url = _PATCHING_BACKENDS[tokenizer_backend]
             raise RuntimeError(
-                f"fastokens failed to load tokenizer for {tokenizer_name!r}. "
-                f"This model's tokenizer may not be supported by fastokens — "
-                f"see https://github.com/crusoecloud/fastokens. "
-                f"Re-run without --tokenizer-backend=fastokens to use the default backend."
+                f"{module_name} failed to load tokenizer for {tokenizer_name!r}. "
+                f"This model's tokenizer may not be supported by {module_name} — "
+                f"see {docs_url}. "
+                f"Re-run without --tokenizer-backend={tokenizer_backend} to use "
+                f"the default backend."
             ) from e
         raise
 

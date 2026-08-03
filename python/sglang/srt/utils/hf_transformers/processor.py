@@ -215,10 +215,9 @@ def get_processor(
     model_name: Optional[str] = None,
     **kwargs,
 ):
-    if tokenizer_backend == "fastokens":
-        from .tokenizer import _ensure_fastokens_patched
+    from .tokenizer import _ensure_backend_patched
 
-        _ensure_fastokens_patched()
+    _ensure_backend_patched(tokenizer_backend)
 
     revision = kwargs.pop("revision", tokenizer_revision)
     image_processor_backend = _normalize_image_processor_backend(
