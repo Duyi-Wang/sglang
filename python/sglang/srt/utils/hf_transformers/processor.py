@@ -221,10 +221,9 @@ def get_processor(
     model_name: Optional[str] = None,
     **kwargs,
 ):
-    if tokenizer_backend == "fastokens":
-        from .tokenizer import _ensure_fastokens_patched
+    from .tokenizer import _ensure_backend_patched
 
-        _ensure_fastokens_patched()
+    _ensure_backend_patched(tokenizer_backend)
 
     revision = kwargs.pop("revision", tokenizer_revision)
     image_processor_backend = _normalize_image_processor_backend(
@@ -256,7 +255,14 @@ def get_processor(
         )
     if config.model_type == "deepseek_v41" and config.vision_n_layers > 0:
         return get_tokenizer(
-            tokenizer_name, trust_remote_code=trust_remote_code, revision=revision
+            tokenizer_name,
+            *args,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            tokenizer_revision=revision,
+            revision=revision,
+            tokenizer_backend=tokenizer_backend,
+            **kwargs,
         )
     is_ocr2 = _is_deepseek_ocr2_model(config)
     if _is_deepseek_ocr_model(config) or is_ocr2:
