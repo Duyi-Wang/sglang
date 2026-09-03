@@ -740,7 +740,10 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             forward_batch.dp_padding_mode.is_max_len(),
             forward_batch.global_num_tokens_cpu,
         )
-        set_is_extend_in_batch(False)
+        # Prefill graphs only serve EXTEND batches. Capturing under False makes the
+        # flag disagree with what prepare_mlp_sync_batch sets at serving time, which
+        # invalidates every captured shape on first replay under DP.
+        set_is_extend_in_batch(True)
 
         with self._prefill_forward_context(forward_batch):
             pp_proxy_tensors = self._capture_pp_proxy_tensors(num_tokens)
@@ -824,7 +827,8 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             fb.dp_padding_mode.is_max_len(),
             fb.global_num_tokens_cpu,
         )
-        set_is_extend_in_batch(False)
+        # See _run_forward.
+        set_is_extend_in_batch(True)
 
         with (
             forward_context(
