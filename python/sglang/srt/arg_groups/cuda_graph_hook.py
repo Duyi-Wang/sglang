@@ -113,6 +113,12 @@ def apply_cuda_graph_compatibility(server_args: Any):
 
     cfg = resolving_view(server_args)
     if (Phase.PREFILL, "backend") in server_args._cuda_graph_config_locked:
+        # An explicit backend overrides the policy below, but not the rules
+        # where the graphs are captured and then discarded unused.
+        if cfg.cuda_graph_config.prefill.backend == Backend.TC_PIECEWISE:
+            disable_tc_piecewise_cudagraph_if_incompatible(
+                server_args, explicitly_requested=True
+            )
         return
 
     # PP prefill graph replay is opt-in. It is most useful for small
@@ -166,9 +172,19 @@ def apply_cuda_graph_compatibility(server_args: Any):
         disable_full_prefill_cudagraph_if_incompatible(server_args)
 
 
-def disable_tc_piecewise_cudagraph_if_incompatible(server_args: Any):
+# Rules an explicit --cuda-graph-backend-prefill=tc_piecewise must not override:
+# the backend does not merely go unvalidated there, it ends up slower than off.
+_TC_PIECEWISE_HARD_INCOMPATIBLE = frozenset({"hierarchical cache"})
+
+
+def disable_tc_piecewise_cudagraph_if_incompatible(
+    server_args: Any, *, explicitly_requested: bool = False
+):
     """TcPiecewise (torch.compile + piecewise) is incompatible with
     these configurations. Most are torch.compile / dynamo limitations.
+
+    Under ``explicitly_requested`` only :data:`_TC_PIECEWISE_HARD_INCOMPATIBLE`
+    still disables the backend; the rest merely warn.
     """
 
     cfg = resolving_view(server_args)
@@ -223,10 +239,12 @@ def disable_tc_piecewise_cudagraph_if_incompatible(server_args: Any):
             ),
         ),
         ("DLLM (diffusion LLM)", lambda: cfg.dllm_algorithm is not None),
-        (
-            "CPU offload / hierarchical cache",
-            lambda: cfg.cpu_offload_gb > 0 or cfg.enable_hierarchical_cache,
-        ),
+        ("CPU offload", lambda: cfg.cpu_offload_gb > 0),
+        # Attaches its LayerDoneCounter to the device KV pool only after capture,
+        # so capture traces `layer_transfer_counter is None` in wait_layer_transfer
+        # while serving sees a real counter. Dynamo guards on that identity, and a
+        # miss swaps in a graph-less backend that capture_session never refills.
+        ("hierarchical cache", lambda: cfg.enable_hierarchical_cache),
         (
             "deterministic inference",
             lambda: cfg.enable_deterministic_inference,
@@ -250,18 +268,34 @@ def disable_tc_piecewise_cudagraph_if_incompatible(server_args: Any):
             lambda: cfg.dcp_size > 1,
         ),
     ]
-    for _name, predicate in rules:
-        if predicate():
-            declare_resolution(
-                server_args,
-                "_disable_tc_piecewise_cudagraph_if_incompatible",
-                cuda_graph_config=with_phase(
-                    cfg.cuda_graph_config, Phase.PREFILL, backend=Backend.DISABLED
-                ),
+    for name, predicate in rules:
+        if not predicate():
+            continue
+        if explicitly_requested and name not in _TC_PIECEWISE_HARD_INCOMPATIBLE:
+            logger.warning(
+                "tc_piecewise prefill CUDA graph is not validated with %s, but "
+                "--cuda-graph-backend-prefill was set explicitly. Keeping it.",
+                name,
             )
-            # One decision, one declaration: every rule declares the same
-            # value, so a later match would only append a duplicate entry.
-            break
+            continue
+        if explicitly_requested:
+            logger.error(
+                "Disabling the prefill CUDA graph: tc_piecewise cannot work with "
+                "%s. Capture would succeed and every captured graph would then be "
+                "discarded unused, leaving the engine slower than with the graph "
+                "off. Drop one of the two flags.",
+                name,
+            )
+        declare_resolution(
+            server_args,
+            "_disable_tc_piecewise_cudagraph_if_incompatible",
+            cuda_graph_config=with_phase(
+                cfg.cuda_graph_config, Phase.PREFILL, backend=Backend.DISABLED
+            ),
+        )
+        # One decision, one declaration: every rule declares the same
+        # value, so a later match would only append a duplicate entry.
+        break
 
 
 def disable_breakable_cudagraph_if_incompatible(server_args: Any):
