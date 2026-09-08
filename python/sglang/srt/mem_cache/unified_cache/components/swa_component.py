@@ -307,8 +307,8 @@ class SWAComponent(TreeComponent):
 
         # unified_kv never caches the SWA ring (per-request, not content-stable),
         # so SWA bookkeeping must not gate the match here.
-        swa_device_only_hicache = (
-            not self.tree_core.has_swa_host_pool and self.tree_core.enable_hicache
+        is_unified_kv = getattr(
+            self.cache.token_to_kv_pool_allocator.get_kvcache(), "_unified_kv", False
         )
 
         def validator(node: UnifiedTreeNode) -> bool:
@@ -317,7 +317,7 @@ class SWAComponent(TreeComponent):
             # — load_back will restore SWA from host before use.
             if cd.value is None and (match_device_only or cd.host_value is None):
                 state["len"] = 0
-                if swa_device_only_hicache and (node.backuped or not node.evicted):
+                if is_unified_kv and (node.backuped or not node.evicted):
                     return True
                 return False
             state["len"] += len(node.key)

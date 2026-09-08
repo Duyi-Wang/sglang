@@ -35,6 +35,7 @@ from sglang.srt.mem_cache.hicache_storage import (
     PoolTransfer,
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.mem_cache.unified_cache.components import (
     ExternalLinkerLoadPhase,
     LinkerTransferPhase,
@@ -141,6 +142,15 @@ class UnifiedCacheLinkerWrapper:
     ):
         self.cache = cache
         self.cache_linker = cache_linker
+        swa = cache.components.get(ComponentType.SWA)
+        self._skip_swa = swa is not None and getattr(
+            cache.token_to_kv_pool_allocator.get_kvcache(), "_unified_kv", False
+        )
+        self._components = tuple(
+            component
+            for component in cache._components_tuple
+            if not (self._skip_swa and component is swa)
+        )
         # rid -> what match found, consumed by the next init_load_back.
         self.hit_markers: dict[str, ExternalCacheHitMarker] = {}
         # Loads in flight, each pinning its inserted endpoint until DMA completes.
@@ -172,7 +182,7 @@ class UnifiedCacheLinkerWrapper:
             return result
 
         lookup_transfers = []
-        for component in cache._components_tuple:
+        for component in self._components:
             transfer = component.build_external_linker_transfer(
                 LinkerTransferPhase.LOOKUP, None, tail_hashes
             )
@@ -270,7 +280,7 @@ class UnifiedCacheLinkerWrapper:
 
         # Build per-component linker transfers.
         component_transfers: list[tuple[TreeComponent, PoolTransfer]] = []
-        for component in cache._components_tuple:
+        for component in self._components:
             transfer = component.build_external_linker_transfer(
                 LinkerTransferPhase.LOAD, None, tail_hashes
             )
@@ -292,6 +302,20 @@ class UnifiedCacheLinkerWrapper:
             component_transfers,
             prefix_len,
         )
+
+        # Components omitted from the linker do not run their PREPARE hook.
+        # Keep a non-restorable SWA range as tombstones instead of rebuilding
+        # it from an uninitialized FULL-to-SWA mapping during cache.insert().
+        if self._skip_swa:
+            if req.kv is None:
+                from sglang.srt.managers.schedule_batch import ReqKvInfo
+
+                req.kv = ReqKvInfo(
+                    kv_allocated_len=prefix_len,
+                    swa_evicted_seqlen=prefix_len,
+                )
+            else:
+                req.kv.swa_evicted_seqlen = max(req.kv.swa_evicted_seqlen, prefix_len)
 
         # Insert the newly loaded tail into the tree.
         prefix_indices = torch.cat(
@@ -468,7 +492,7 @@ class UnifiedCacheLinkerWrapper:
         cache = self.cache
         node = cache.resolve_node_handle(node_id)
         transfers = []
-        for component in cache._components_tuple:
+        for component in self._components:
             transfer = component.build_external_linker_transfer(
                 LinkerTransferPhase.OFFLOAD, node, None
             )
