@@ -118,7 +118,7 @@ ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 # dsv4opt: Duyi-Wang/aiter dsv4opt/aiter-integ (aiter main b0c4209d4d + #6030/#6004/#6029/#5882);
 # this sha only exists on the fork, build with --build-arg AITER_REPO=https://github.com/Duyi-Wang/aiter.git
-ENV AITER_COMMIT_DEFAULT="a1874242cec3399420ce93ca339da4d469ff9a37"
+ENV AITER_COMMIT_DEFAULT="a5d49321acb6b67bbd82b9ccb705c8851dad7cf1"
 ENV TRITON_COMMIT_DEFAULT="42270451990532c67e69d753fbd026f28fcc4840"
 
 # ===============================
@@ -131,7 +131,7 @@ ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 # dsv4opt: Duyi-Wang/aiter dsv4opt/aiter-integ (aiter main b0c4209d4d + #6030/#6004/#6029/#5882);
 # this sha only exists on the fork, build with --build-arg AITER_REPO=https://github.com/Duyi-Wang/aiter.git
-ENV AITER_COMMIT_DEFAULT="a1874242cec3399420ce93ca339da4d469ff9a37"
+ENV AITER_COMMIT_DEFAULT="a5d49321acb6b67bbd82b9ccb705c8851dad7cf1"
 # Pin the ROCm torch stack for every pip invocation in this flavor. The file is
 # filled in after the torch 2.11 upgrade below; it must already exist (empty is
 # valid) because pip reads PIP_CONSTRAINT from the first pip call onwards.
