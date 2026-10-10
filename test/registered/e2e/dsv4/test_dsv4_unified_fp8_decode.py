@@ -180,7 +180,8 @@ class TestUnifiedFp8Decode(CustomTestCase):
         with (
             mock.patch.object(runtime, "_flydsl_v4_decode", lambda: None)
             if asm
-            else contextlib.nullcontext()
+            # FlyDSL at H128 is opt-in; cover it here
+            else envs.SGLANG_DSV4_FLYDSL_DECODE_H128.override(True)
         ):
             got = runtime.decode_fp8_2buff(
                 q=q_packed,

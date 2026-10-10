@@ -2471,7 +2471,10 @@ class DeepseekV4HipRadixBackend(
         from sglang.kernels.ops.attention.dsv4.unified_kv_kernels import runtime
 
         win = self.token_to_kv_pool.unified_swa_window
-        ctx = envs.SGLANG_DSV4_FP8_DECODE_SPLIT_CTX.get() or self.max_context_len
+        ctx = min(
+            envs.SGLANG_DSV4_FP8_DECODE_SPLIT_CTX.get() or self.max_context_len,
+            self.max_context_len,
+        )
         # longest KV one decode row of each stream can see
         self._fp8_split_kv_hint = {
             0: win,

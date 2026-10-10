@@ -494,9 +494,14 @@ def flydsl_decode_supported(
     num_heads: int, max_seqlen_q: int = 1, grouped: bool = False
 ) -> bool:
     fly = _flydsl_v4_decode()
-    return fly is not None and fly.flydsl_mla_v4_decode_supported(
-        num_heads, max_seqlen_q, grouped
-    )
+    if fly is None:
+        return False
+    if num_heads == 128:
+        from sglang.srt.environ import envs
+
+        if not envs.SGLANG_DSV4_FLYDSL_DECODE_H128.get():
+            return False
+    return fly.flydsl_mla_v4_decode_supported(num_heads, max_seqlen_q, grouped)
 
 
 def _stream_hint(compress_ratio: Optional[int]) -> Optional[str]:
