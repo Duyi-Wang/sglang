@@ -1596,6 +1596,17 @@ class Envs:
     # fp8 unified_kv decode/verify on aiter's FlyDSL v4 nm decode when the
     # installed aiter ships it; 0 keeps the asm kernel.
     SGLANG_DSV4_FLYDSL_DECODE = EnvBool(True)
+    # fp8 unified_kv asm decode (when FlyDSL is off or absent): pick the KV
+    # split count from aiter's v4 nm latency model (ROCm/aiter#6126; ported
+    # when aiter predates it) with a constant split_indptr, per stream kind.
+    SGLANG_DSV4_FP8_DECODE_SPLIT_MODEL = EnvBool(False)
+    # context the HCA split plan is sized for (0: the server context length)
+    SGLANG_DSV4_FP8_DECODE_SPLIT_CTX = EnvInt(0)
+    # fp8 unified_kv asm decode: HCA layers with 128 local heads (DP attention)
+    # take aiter's persistent mla_decode_fwd_v4_nm_ps (in-kernel split + merge)
+    # for MIN_ROWS..32768 rows; needs aiter >= ROCm/aiter#6126.
+    SGLANG_DSV4_FP8_HCA_PERSIST = EnvBool(False)
+    SGLANG_DSV4_FP8_HCA_PERSIST_MIN_ROWS = EnvInt(15)
 
     # DeepSeek-V4.1 engram host table: keep the tables in host memory (layout
     # below) and gather rows from the GPU instead of sharding them over HBM.
