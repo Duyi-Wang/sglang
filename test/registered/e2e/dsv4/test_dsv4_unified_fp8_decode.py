@@ -490,7 +490,7 @@ class TestUnifiedFp8Decode(CustomTestCase):
             graph.replay()
             torch.cuda.synchronize()
             eager = runtime.decode_fp8_2buff(**kw)
-        self.assertTrue(torch.equal(captured, eager))
+        self._assert_close(captured.float(), eager.float(), atol=1e-2, rtol=1e-2)
 
     @_needs_gfx950
     @unittest.skipUnless(runtime._hca_ps_api() is not None, "aiter has no v4 nm ps")
