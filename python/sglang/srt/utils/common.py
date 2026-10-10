@@ -4182,6 +4182,22 @@ def require_mlp_tp_gather(*, moe_a2a_backend=None):
             # the trim saves. With uniform buckets the per-tier fan-in is exact.
             # Scoped to the opt-in gate so the default path is untouched.
             return True
+        elif (
+            moe_a2a_backend.is_megamoe()
+            and is_hip()
+            and envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get()
+            and envs.SGLANG_AMD_FLYDSL_MEGA_MOE_DECODE_MTPR.get() > 0
+        ):
+            # Same bookkeeping again. With a decode-sized aiter MegaMoEV2
+            # instance next to the prefill-sized one, every forward has to pick
+            # the same instance on every EP rank: each owns its own symmetric
+            # buffers, and the capacity also selects the P2P wire format. The
+            # pick keys off max(global_num_tokens), which is only rank-invariant
+            # with the DP-synchronized counts and graph buckets this enables;
+            # with per-rank buckets one rank could replay a graph on the decode
+            # instance while a peer runs the prefill one. The MoE stays
+            # SCATTERED (a2a backend), as for FlashInfer above.
+            return True
         else:
             return (
                 get_parallel().moe_dense_tp_size

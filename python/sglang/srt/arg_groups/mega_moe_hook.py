@@ -103,6 +103,7 @@ def validate_mega_moe_token_budget(server_args: ServerArgs, model_label: str) ->
     if cfg.moe_a2a_backend != "megamoe":
         return
     if get_platform().is_hip:
+        validate_aiter_mega_moe_decode_budget(cfg, model_label)
         return
 
     max_tokens_per_rank = (
@@ -214,3 +215,23 @@ def handle_moe_runner_backend_alias(server_args: ServerArgs) -> None:
         moe_runner_backend="auto",
         moe_a2a_backend="megamoe",
     )
+
+
+def validate_aiter_mega_moe_decode_budget(cfg, model_label: str) -> None:
+    """A PD decode node only runs decode / verify forwards, so a decode-sized
+    aiter MegaMoEV2 capacity (SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR) is enough; but a
+    forward above it has no fused-MoE fallback on DSV4. Fail at startup instead
+    of on the first full batch."""
+    if cfg.disaggregation_mode != "decode":
+        return
+    if not envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get():
+        return
+    decode_tokens = mega_moe_decode_tokens_per_rank(cfg)
+    mtpr = envs.SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR.get()
+    if decode_tokens > mtpr:
+        raise ValueError(
+            f"{model_label} with aiter MegaMoE on a PD decode node requires "
+            "SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR to cover the largest decode / verify "
+            f"forward on one rank: decode cuda graph max bs x tokens per request = "
+            f"{decode_tokens} > SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR={mtpr}."
+        )

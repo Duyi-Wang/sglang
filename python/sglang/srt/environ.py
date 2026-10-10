@@ -683,6 +683,12 @@ class Envs:
     SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS = EnvBool(True)
     # Decode batches between SWA out-of-window evictions.
     SGLANG_SWA_EVICTION_INTERVAL = EnvInt(128)
+    # Per-request SWA eviction trigger: "token" (evict once eviction_interval
+    # tokens have slid out of the window), "forward" (every eviction_interval-th
+    # forward), or "auto" (forward with HIP SGLANG_AMD_USE_FLYDSL_MEGA_MOE, else
+    # token). Lets a PD decode node run aiter MegaMoE without inheriting the
+    # forward cadence that DEP prefill/agg needs.
+    SGLANG_SWA_EVICTION_CADENCE = EnvStr("auto")
     # The tree-core registry falls back to Python for:
     # - Session-aware caching.
     # - C128 or other unsupported components.
@@ -951,6 +957,21 @@ class Envs:
     SGLANG_USE_AITER_FP8_PER_TOKEN = EnvBool(False)
     SGLANG_AMD_USE_FLYDSL_MEGA_MOE = EnvBool(False)
     SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR = EnvInt(8192)
+    # Rows per rank of a second, decode-sized MegaMoEV2 instance; 0 disables it.
+    # A forward whose DP-wide max token count fits uses it instead of the
+    # SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR instance, so aiter picks its small-capacity
+    # config (no fp8 P2P quant; fixed-slot up to AITER_MEGA_FIXED_SLOT_MAX_MTPR)
+    # for decode/verify/draft. Turning it on also turns on the DP-synchronized
+    # batch bookkeeping of require_mlp_tp_gather(), which keeps the choice
+    # identical on every EP rank. Only needed where one server runs both
+    # prefill and decode; a PD decode node sets SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR
+    # to its decode size instead.
+    SGLANG_AMD_FLYDSL_MEGA_MOE_DECODE_MTPR = EnvInt(0)
+    # Route padded MegaMoE rows (DP / cuda-graph padding) to expert -1 and have
+    # combine skip them, so they are neither dispatched nor computed (ATOM's
+    # ATOM_MEGA_MASK_PAD_ROWS). Needs an aiter MegaMoEV2 with
+    # supports_combine_mask; without it the rows keep the out-of-range id.
+    SGLANG_AITER_MEGA_MASK_PAD_ROWS = EnvBool(False)
     SGLANG_AMD_FLYDSL_MEGA_QUANT = EnvStr("")
     SGLANG_AITER_MEGA_RANK_SYNC = EnvBool(False)
     SGLANG_AITER_MEGA_EPLB_PREFILL_ONLY = EnvBool(False)

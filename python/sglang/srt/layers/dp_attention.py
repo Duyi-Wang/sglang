@@ -215,6 +215,11 @@ class _DpGatheredBufferWrapper:
     _dp_max_padding: bool = False
     _global_num_tokens: Optional[List[int]] = None
     _global_num_tokens_gpu: Optional[torch.Tensor] = None
+    # Largest all-gathered per-rank token count of the current eager forward,
+    # taken before any rank-local rewrite (e.g. the MegaMoE idle-rank [1]*dp
+    # padding), so it is the same number on every DP rank. None outside
+    # prepare_mlp_sync_batch (graph capture, TBO children).
+    _raw_global_max_tokens: Optional[int] = None
 
     @classmethod
     def set_metadata(cls, hidden_size: int, dtype: torch.dtype, device: torch.device):
@@ -238,6 +243,7 @@ class _DpGatheredBufferWrapper:
         cls._dp_max_padding = dp_max_padding
         cls._global_num_tokens = global_num_tokens
         cls._global_num_tokens_gpu = global_num_tokens_gpu
+        cls._raw_global_max_tokens = None
 
     @classmethod
     def get_global_dp_buffer(cls, group: GroupCoordinator) -> torch.Tensor:
@@ -323,6 +329,16 @@ def set_dp_buffer_len(
 
 def get_global_dp_buffer(group: GroupCoordinator) -> torch.Tensor:
     return _DpGatheredBufferWrapper.get_global_dp_buffer(group=group)
+
+
+def set_dp_raw_global_max_tokens(num_tokens: Optional[int]) -> None:
+    """Publish the rank-invariant max token count of this eager forward; call
+    after set_dp_buffer_len, which resets it."""
+    _DpGatheredBufferWrapper._raw_global_max_tokens = num_tokens
+
+
+def get_dp_raw_global_max_tokens() -> Optional[int]:
+    return _DpGatheredBufferWrapper._raw_global_max_tokens
 
 
 def get_local_dp_buffer(

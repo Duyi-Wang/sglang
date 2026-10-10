@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -14,7 +15,10 @@ from sglang.kernels.ops.moe.fill_padded_rows import _fill_padded_rows
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers.attention.dsa.utils import is_dsa_enable_prefill_cp
-from sglang.srt.layers.dp_attention import get_dp_global_num_tokens
+from sglang.srt.layers.dp_attention import (
+    get_dp_global_num_tokens,
+    get_dp_raw_global_max_tokens,
+)
 from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.model_executor.runner import get_is_capture_mode
 from sglang.srt.runtime_context import get_parallel
@@ -23,6 +27,8 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v2 import DeepseekV2MoE
 
+
+logger = logging.getLogger(__name__)
 
 _MORI_SHMEM_READY = False
 _MEGA_MOE_INSTANCE: dict = {}
@@ -52,6 +58,57 @@ def _mtpr() -> int:
             f"SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR={mtpr} must be a positive power of two"
         )
     return mtpr
+
+
+def _decode_mtpr() -> int:
+    """Capacity of the decode-sized instance, or 0 when it is disabled."""
+    mtpr = int(envs.SGLANG_AMD_FLYDSL_MEGA_MOE_DECODE_MTPR.get())
+    if mtpr == 0:
+        return 0
+    main_mtpr = _mtpr()
+    if mtpr < 0 or mtpr & (mtpr - 1) or mtpr >= main_mtpr:
+        raise ValueError(
+            f"SGLANG_AMD_FLYDSL_MEGA_MOE_DECODE_MTPR={mtpr} must be 0 or a power "
+            f"of two below SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR={main_mtpr}"
+        )
+    return mtpr
+
+
+def _select_mtpr() -> int:
+    """Capacity of the instance this forward runs on.
+
+    Every EP rank has to make the same choice: each instance owns its own
+    symmetric buffers and P2P wire format. Enabling the decode instance also
+    makes require_mlp_tp_gather() true, so get_dp_global_num_tokens() holds the
+    DP-synchronized per-rank counts (identical on every rank, in eager forwards
+    and in graph capture alike) and every rank replays the same graph bucket.
+    Without those counts, fall back to the main instance.
+    """
+    main_mtpr = _mtpr()
+    decode_mtpr = _decode_mtpr()
+    if not decode_mtpr or is_dsa_enable_prefill_cp():
+        return main_mtpr
+    # Eager forwards: the all-gathered max from prepare_mlp_sync_batch. The
+    # published global_num_tokens can differ per rank there: an idle rank of a
+    # global prefill rewrites its own to [1] * dp, so a peer that is
+    # prefilling would pick the large instance while it picked the small one.
+    raw_max = None if get_is_capture_mode() else get_dp_raw_global_max_tokens()
+    if raw_max is not None:
+        return decode_mtpr if raw_max <= decode_mtpr else main_mtpr
+    # Graph capture: the captured shape, uniform across ranks under DP sync.
+    global_num_tokens = get_dp_global_num_tokens()
+    if not global_num_tokens:
+        return main_mtpr
+    return decode_mtpr if max(global_num_tokens) <= decode_mtpr else main_mtpr
+
+
+def _mask_pad_rows() -> bool:
+    """Padded rows go to expert -1 and combine skips them. Needs an aiter whose
+    MegaMoEV2 masks -1 top-k slots in combine; without it the rows keep the
+    out-of-range id `experts`, which dispatch already drops."""
+    if not envs.SGLANG_AITER_MEGA_MASK_PAD_ROWS.get():
+        return False
+    return bool(getattr(_import_aiter_megamoe().op, "supports_combine_mask", False))
 
 
 def _ep_rank_world():
@@ -162,7 +219,29 @@ def _get_or_build_mega_moe(
             swiglu_limit=swiglu_limit,
         )
         _MEGA_MOE_INSTANCE[key] = mega
+        logger.info(
+            "Aiter MegaMoE instance built: ep_rank=%d/%d mtpr=%d fixed_slot=%s",
+            rank,
+            world,
+            mtpr,
+            getattr(mega, "_s1_fixed_slot", None),
+        )
     return mega
+
+
+def _get_mega_moe_for_forward(layer, *, selected_mtpr: int, **build_args):
+    """Make sure every configured capacity exists, then return the selected one.
+
+    MegaMoEV2 construction allocates symmetric memory and ends in a barrier over
+    the EP group, so all ranks have to build the same instances in the same
+    order. Building both on the first forward (the warmup that precedes graph
+    capture) keeps that barrier out of capture and out of any rank-local branch.
+    """
+    instances = {}
+    for mtpr in (_mtpr(), _decode_mtpr()):
+        if mtpr:
+            instances[mtpr] = _get_or_build_mega_moe(layer, mtpr=mtpr, **build_args)
+    return instances[selected_mtpr]
 
 
 def _swap_layer_weights(mega, layer) -> None:
@@ -237,6 +316,7 @@ def _run_mega_routed(
     hidden_size = moe.config.hidden_size
     topk = moe.config.num_experts_per_tok + moe.num_fused_shared_experts
     experts = moe.experts.num_experts
+    mask_pad_rows = _mask_pad_rows()
     if num_tokens:
         router_logits = moe.gate(hidden_states, forward_batch=forward_batch)
         topk_kwargs = {"input_ids": input_ids_global} if moe.is_hash else {}
@@ -260,7 +340,7 @@ def _run_mega_routed(
             _fill_padded_rows(
                 topk_ids,
                 forward_batch.num_token_non_padded,
-                experts,
+                -1 if mask_pad_rows else experts,
             )
     else:
         rank_sync = envs.SGLANG_AITER_MEGA_RANK_SYNC.get()
@@ -282,32 +362,35 @@ def _run_mega_routed(
         else:
             topk_ids = torch.full(
                 (1, topk),
-                experts,
+                -1 if mask_pad_rows else experts,
                 device=hidden_states.device,
                 dtype=torch.int32,
             )
             topk_weights = hidden_states.new_zeros((1, topk), dtype=torch.float32)
 
-    selected_mtpr = _mtpr()
+    selected_mtpr = _select_mtpr()
     x_in = x_in.contiguous()
     topk_ids = topk_ids.contiguous()
     topk_weights = topk_weights.contiguous()
     assert x_in.shape[0] <= selected_mtpr, (
         f"Aiter MegaMoE local tokens {x_in.shape[0]} exceed MTPR {selected_mtpr}"
     )
-    mega = _get_or_build_mega_moe(
+    mega = _get_mega_moe_for_forward(
         moe.experts,
+        selected_mtpr=selected_mtpr,
         model_dim=hidden_size,
         inter_dim=moe.config.moe_intermediate_size,
         experts=experts,
         topk=topk,
         quant=envs.SGLANG_AMD_FLYDSL_MEGA_QUANT.get() or "a8w4",
         swiglu_limit=float(getattr(moe.config, "swiglu_limit", 0.0) or 0.0),
-        mtpr=selected_mtpr,
     )
     _swap_layer_weights(mega, moe.experts)
 
-    output = mega.forward(x_in, topk_weights, topk_ids, slice_output=False)[:num_tokens]
+    forward_kwargs = {"mask_invalid_slots": True} if mask_pad_rows else {}
+    output = mega.forward(
+        x_in, topk_weights, topk_ids, slice_output=False, **forward_kwargs
+    )[:num_tokens]
 
     from sglang.srt.models.deepseek_common.utils import _use_aiter
 

@@ -47,6 +47,7 @@ from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
     dp_slot_in,
     set_dp_buffer_len_from_batch,
+    set_dp_raw_global_max_tokens,
     set_is_extend_in_batch,
     world_dp_gather_enabled,
 )
@@ -1638,6 +1639,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
         self._original_batch_size = self.batch_size
         global_num_tokens = list(self.global_num_tokens_cpu)
+        # Rank-invariant (all-gathered) before the idle-rank rewrite below, which
+        # only idle ranks apply; MegaMoE picks its instance capacity from it.
+        raw_global_max_tokens = max(global_num_tokens) if global_num_tokens else 0
         # MegaMoEv2 dispatch is rank-synchronous, so an idle rank still carries the
         # one row _run_mega_routed fabricates for it. HIP-only, False elsewhere.
         mega_moe_idle_materialize = _mega_moe_materializes_idle_rank(self)
@@ -1711,6 +1715,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         self.global_dp_buffer_len = buffer_len
         self.global_num_tokens_padded_cpu = global_num_tokens
         set_dp_buffer_len_from_batch(self)
+        set_dp_raw_global_max_tokens(raw_global_max_tokens)
         set_is_extend_in_batch(self.is_extend_in_batch)
 
         bs = self.batch_size

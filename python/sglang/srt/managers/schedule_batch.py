@@ -2314,6 +2314,19 @@ def _compute_chunked_req_next_prompt_token(
     return None
 
 
+def _swa_forward_cadence() -> bool:
+    cadence = envs.SGLANG_SWA_EVICTION_CADENCE.get().strip().lower()
+    if cadence == "forward":
+        return True
+    if cadence == "token":
+        return False
+    if cadence != "auto":
+        raise ValueError(
+            f"SGLANG_SWA_EVICTION_CADENCE={cadence!r} must be auto, token or forward"
+        )
+    return _is_hip and envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get()
+
+
 @dataclasses.dataclass
 class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     """Store all information of a batch on the scheduler."""
@@ -3857,8 +3870,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         Aiter MegaMoE DSV4 keeps the older forward-interval cadence instead:
         per-request token gating synchronizes SWA pressure across DP ranks and
         triggers a retraction / re-prefill storm at high concurrency.
+        SGLANG_SWA_EVICTION_CADENCE overrides the choice ("token" / "forward"),
+        e.g. a PD decode node running MegaMoE keeps the token cadence.
         """
-        if _is_hip and envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get():
+        if _swa_forward_cadence():
             due_this_forward = (self.forward_iter or 0) % eviction_interval == 0
             return lambda req: due_this_forward
         return lambda req: (
