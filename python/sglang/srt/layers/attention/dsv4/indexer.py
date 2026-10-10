@@ -550,6 +550,7 @@ class C4IndexerBackendMixin:
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         skip_compressor: bool = False,
+        kv_score_input: Optional[torch.Tensor] = None,
         q_lora_quant=None,
     ) -> Tuple[IndexerQuery, torch.Tensor]:
         if TYPE_CHECKING:
@@ -558,11 +559,15 @@ class C4IndexerBackendMixin:
         weights = c4_indexer.compute_weights(x, skip_scale=True)
         q, weights = c4_indexer.compute_q(q_lora, positions, weights, q_lora_quant)
         if not skip_compressor:
+            compressor_kwargs = {}
+            if kv_score_input is not None:
+                compressor_kwargs["kv_score_input"] = kv_score_input
             self.forward_indexer_compressor(
                 x=x,
                 forward_batch=forward_batch,
                 layer_id=c4_indexer.layer_id,
                 compressor=c4_indexer.compressor,
+                **compressor_kwargs,
             )
         return q, weights
 
@@ -750,6 +755,7 @@ class C4IndexerBackendMixin:
         enable_multi_stream: bool = False,
         q_lora_ready: Optional[torch.cuda.Event] = None,
         skip_compressor: bool = False,
+        kv_score_input: Optional[torch.Tensor] = None,
         q_lora_quant=None,
     ) -> None:
         if forward_batch.forward_mode.is_idle():
@@ -780,8 +786,11 @@ class C4IndexerBackendMixin:
             q_lora_quant = None
         if positions.shape[0] != num_queries:
             positions = positions[:num_queries]
+        if kv_score_input is not None and kv_score_input.shape[0] != num_queries:
+            kv_score_input = kv_score_input[:num_queries]
 
         if enable_multi_stream:
+            assert kv_score_input is None
             q_indexer, weights = self._forward_prepare_multi_stream(
                 x=x,
                 q_lora=q_lora,
@@ -800,6 +809,7 @@ class C4IndexerBackendMixin:
                 positions=positions,
                 forward_batch=forward_batch,
                 skip_compressor=skip_compressor,
+                kv_score_input=kv_score_input,
                 q_lora_quant=q_lora_quant,
             )
 
@@ -1219,9 +1229,12 @@ class C4Indexer(nn.Module):
         enable_multi_stream: bool = False,
         q_lora_ready: Optional[torch.cuda.Event] = None,
         skip_compressor: bool = False,
+        kv_score_input: Optional[torch.Tensor] = None,
         q_lora_quant=None,
     ) -> None:
         backend_kwargs = {}
+        if kv_score_input is not None:
+            backend_kwargs["kv_score_input"] = kv_score_input
         if q_lora_quant is not None:
             backend_kwargs["q_lora_quant"] = q_lora_quant
         return attn_backend.forward_c4_indexer(

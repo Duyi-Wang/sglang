@@ -163,6 +163,7 @@ class CompressorBackendMixin:
         forward_batch: ForwardBatch,
         layer_id: int,
         compressor: Compressor,
+        kv_score_input: Optional[torch.Tensor] = None,
     ) -> None:
         if forward_batch.forward_mode.is_idle():
             return
@@ -170,7 +171,10 @@ class CompressorBackendMixin:
         if TYPE_CHECKING:
             assert isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
 
-        new_compressed_kv = compressor(x, forward_batch, attn_backend=self)
+        compressor_kwargs = {"attn_backend": self}
+        if kv_score_input is not None:
+            compressor_kwargs["kv_score_input"] = kv_score_input
+        new_compressed_kv = compressor(x, forward_batch, **compressor_kwargs)
         core_metadata = self.forward_metadata.core_metadata
         out_loc = (
             core_metadata.c4_out_loc
@@ -192,13 +196,17 @@ class CompressorBackendMixin:
         forward_batch: ForwardBatch,
         layer_id: int,
         compressor: Compressor,
+        kv_score_input: Optional[torch.Tensor] = None,
     ) -> None:
         assert is_overlap_compress(compressor.ratio)
         token_to_kv_pool = self.token_to_kv_pool
         if TYPE_CHECKING:
             assert isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
 
-        new_compressed_kv = compressor(x, forward_batch, attn_backend=self)
+        compressor_kwargs = {"attn_backend": self}
+        if kv_score_input is not None:
+            compressor_kwargs["kv_score_input"] = kv_score_input
+        new_compressed_kv = compressor(x, forward_batch, **compressor_kwargs)
         out_loc = self.forward_metadata.core_metadata.c4_out_loc
         if out_loc.shape[0] > new_compressed_kv.shape[0]:
             out_loc = out_loc[: new_compressed_kv.shape[0]]
@@ -445,6 +453,13 @@ class Compressor(BaseFusedOp):
     def compute_kv_score(self, x: torch.Tensor, forward_batch: ForwardBatch):
         kv_score = self._compute_wkv_gate(x)
 
+        return self._materialize_kv_score(kv_score, forward_batch)
+
+    @staticmethod
+    def _materialize_kv_score(
+        kv_score: torch.Tensor, forward_batch: ForwardBatch
+    ) -> torch.Tensor:
+
         # CUDA path: delegate to backend
         if dsa_use_prefill_cp(forward_batch):
             kv_score = cp_materialize_global_token_order(
@@ -454,10 +469,17 @@ class Compressor(BaseFusedOp):
             )
         return kv_score
 
-    def _compute_wkv_gate(self, x: torch.Tensor) -> torch.Tensor:
-        weight = getattr(self.wkv_gate, "weight", None)
+    def _compute_wkv_gate(
+        self, x: torch.Tensor, weight: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # weight given: the fused C4 main+indexer [2560, K] projection
+        # (SGLANG_OPT_DSV4_C4_COMPRESSOR_GEMM_FUSION). aiter has no bf16-out row
+        # for that shape, so it stays on linear_bf16_fp32, which reaches aiter's
+        # fp32-out FlyDSL kernel when its tuned table has the row.
+        fused = weight is not None
+        weight = weight if fused else getattr(self.wkv_gate, "weight", None)
         if weight is not None:
-            if _use_aiter and weight.dtype == torch.bfloat16:
+            if _use_aiter and not fused and weight.dtype == torch.bfloat16:
                 # aiter's tuned GEMM for these shapes; kv_score is bf16-rounded
                 return tgemm.mm(x, weight, otype=x.dtype).float()
             return linear_bf16_fp32(x, weight)
@@ -475,12 +497,17 @@ class Compressor(BaseFusedOp):
         x: torch.Tensor,
         forward_batch: ForwardBatch,
         attn_backend: Optional[AttentionBackend] = None,
+        kv_score_input: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if forward_batch.forward_mode.is_idle():
             assert x.shape[0] == 0
             return x.new_empty(0, self.head_dim)
 
-        kv_score = self.compute_kv_score(x, forward_batch)
+        kv_score = (
+            self.compute_kv_score(x, forward_batch)
+            if kv_score_input is None
+            else self._materialize_kv_score(kv_score_input, forward_batch)
+        )
 
         if TYPE_CHECKING:
             assert isinstance(attn_backend, DeepseekV4AttnBackend)
