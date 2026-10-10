@@ -116,7 +116,9 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="e7d2453f25e5aaeea72a3a40b284ba453e026624"
+# dsv4opt: Duyi-Wang/aiter dsv4opt/aiter-integ (aiter main b0c4209d4d + #6030/#6004/#6029/#5882);
+# this sha only exists on the fork, build with --build-arg AITER_REPO=https://github.com/Duyi-Wang/aiter.git
+ENV AITER_COMMIT_DEFAULT="a1874242cec3399420ce93ca339da4d469ff9a37"
 ENV TRITON_COMMIT_DEFAULT="42270451990532c67e69d753fbd026f28fcc4840"
 
 # ===============================
@@ -127,7 +129,9 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="e7d2453f25e5aaeea72a3a40b284ba453e026624"
+# dsv4opt: Duyi-Wang/aiter dsv4opt/aiter-integ (aiter main b0c4209d4d + #6030/#6004/#6029/#5882);
+# this sha only exists on the fork, build with --build-arg AITER_REPO=https://github.com/Duyi-Wang/aiter.git
+ENV AITER_COMMIT_DEFAULT="a1874242cec3399420ce93ca339da4d469ff9a37"
 # Pin the ROCm torch stack for every pip invocation in this flavor. The file is
 # filled in after the torch 2.11 upgrade below; it must already exist (empty is
 # valid) because pip reads PIP_CONSTRAINT from the first pip call onwards.
@@ -577,10 +581,20 @@ RUN pip uninstall -y aiter
 # The #6042, #5967 and #6007 patches are written against the gfx942/gfx950 AITER pin and
 # do not apply to the older gfx1250 one (a conflict in pa_decode_sparse.py, and
 # the dsv41 CSVs and the group32 GEMM do not exist there yet), so gfx1250 skips them.
+# gfx950-rocm720 / gfx950-rocm724 pin an aiter based on main b0c4209d4d, where:
+#   - #6042 conflicts with #6159 in pa_decode_sparse.py, so apply the resolved patch
+#     docker/patches/aiter_pr6042_resolved.patch instead of cherry-picking 042a2891;
+#   - #5967 is already merged (356c53dacd); re-applying the -U0 diff would duplicate
+#     23 rows in each dsv41_fp4_*_fmoe.csv and aiter raises on duplicate keys;
+#   - the group32 GEMM was merged into gemm_afp8wfp8.py (#5862) with #6007 already in,
+#     so the sed target no longer exists.
+COPY --from=local_src /src/docker/patches/aiter_pr6042_resolved.patch /tmp/aiter_pr6042_resolved.patch
 RUN git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout -f ${AITER_COMMIT} \
- && if [ "${GPU_ARCH_LIST}" != "gfx1250" ]; then \
+ && if [ "${GPU_ARCH}" = "gfx950-rocm720" ] || [ "${GPU_ARCH}" = "gfx950-rocm724" ]; then \
+    git apply /tmp/aiter_pr6042_resolved.patch; \
+ elif [ "${GPU_ARCH_LIST}" != "gfx1250" ]; then \
     git fetch origin pull/6042/head \
     && git cherry-pick --no-commit 042a289183e5b47e193df6c10160915a6e8b69f5 \
     && git fetch origin pull/5967/head \
