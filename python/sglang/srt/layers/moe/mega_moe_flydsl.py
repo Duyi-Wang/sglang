@@ -38,6 +38,14 @@ def _import_aiter_megamoe():
             f"A16W4 shuffle operators. Original import error: {exc}"
         ) from exc
 
+    # TODO(aiter#6259): remove once the ROCm/aiter#6259 regression fix is in the aiter pin
+    # Must run before the first MegaMoEV2 is built: it captures stage1 at construction.
+    from sglang.srt.layers.moe.aiter_mega_moe_intree import (
+        install_mega_moe_stage1_fix,
+    )
+
+    install_mega_moe_stage1_fix()
+
     return SimpleNamespace(
         op=MegaMoEV2,
         shuffle_weight=shuffle_weight_a16w4,
