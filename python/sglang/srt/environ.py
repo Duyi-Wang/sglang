@@ -957,6 +957,10 @@ class Envs:
     SGLANG_AITER_MEGA_RANK_SYNC = EnvBool(False)
     SGLANG_AITER_MEGA_EPLB_PREFILL_ONLY = EnvBool(False)
     SGLANG_AITER_MEGA_EPLB_FUSED_MAP_RECORD = EnvBool(False)
+    # TODO(aiter#6259): remove once the ROCm/aiter#6259 regression fix is in the aiter pin
+    # In-tree MegaMoE stage1 ready-order fix (layers/moe/aiter_mega_moe_intree); applied
+    # only while aiter ships the known unfixed stage1. 0 = use the pinned aiter as is.
+    SGLANG_AITER_INTREE_MEGA_STAGE1_FIX = EnvBool(True)
     # Above 8192 tokens of context, aiter's non-static workspace is large enough
     # that mem_fraction_static is scaled by 0.85 to leave room for it. Set this to
     # honor an explicitly passed --mem-fraction-static instead. Off by default:
