@@ -20,7 +20,6 @@ from typing import Optional
 from transformers import (
     AutoImageProcessor,
     AutoProcessor,
-    AutoTokenizer,
     PreTrainedTokenizerBase,
 )
 from transformers.utils import cached_file
@@ -50,6 +49,7 @@ from .tokenizer import (
     _fix_added_tokens_encoding,
     _fix_special_tokens_pattern,
     _install_tokenizer_warnings_filter,
+    _validate_tokenizer_backend,
     get_tokenizer,
 )
 
@@ -210,7 +210,9 @@ def _build_processor_manually(
     return proc_cls(**init_kwargs)
 
 
-def _get_minimax_m31_processor(model_path, config, revision):
+def _get_minimax_m31_processor(
+    model_path, config, revision, tokenizer_mode, tokenizer_backend
+):
     from transformers import MiniMaxM3VLProcessor
 
     from sglang.srt.multimodal.processors.minimax_m31_media import (
@@ -233,7 +235,14 @@ def _get_minimax_m31_processor(model_path, config, revision):
     max_size = (
         size if isinstance(size, (list, tuple)) else (size["height"], size["width"])
     )
-    tokenizer = get_tokenizer(model_path, trust_remote_code=False, revision=revision)
+    tokenizer = get_tokenizer(
+        model_path,
+        trust_remote_code=False,
+        revision=revision,
+        tokenizer_revision=revision,
+        tokenizer_mode=tokenizer_mode,
+        tokenizer_backend=tokenizer_backend,
+    )
     return MiniMaxM3VLProcessor(
         image_processor=MiniMaxM31ImageProcessor(max_size=max_size, **common),
         video_processor=MiniMaxM31VideoProcessor(max_size=max_size, **common),
@@ -307,10 +316,13 @@ def get_processor(
     # Checkpoints with language_model_only=True are text-only despite their
     # multimodal-family config; route to tokenizer instead of the mm processor.
     if getattr(config, "language_model_only", False):
-        return AutoTokenizer.from_pretrained(
+        return get_tokenizer(
             tokenizer_name,
             *args,
             trust_remote_code=trust_remote_code,
+            tokenizer_mode=tokenizer_mode,
+            tokenizer_backend=tokenizer_backend,
+            tokenizer_revision=revision,
             revision=revision,
             **kwargs,
         )
@@ -324,12 +336,17 @@ def get_processor(
 
     try:
         if config.model_type == "minimax_m3_vl":
-            processor = _get_minimax_m31_processor(tokenizer_name, config, revision)
+            processor = _get_minimax_m31_processor(
+                tokenizer_name, config, revision, tokenizer_mode, tokenizer_backend
+            )
         elif "InternVL3_5" in tokenizer_name:
-            processor = AutoTokenizer.from_pretrained(
+            processor = get_tokenizer(
                 tokenizer_name,
                 *args,
                 trust_remote_code=trust_remote_code,
+                tokenizer_mode=tokenizer_mode,
+                tokenizer_backend=tokenizer_backend,
+                tokenizer_revision=revision,
                 revision=revision,
                 **kwargs,
             )
@@ -436,4 +453,5 @@ def get_processor(
     _fix_special_tokens_pattern(tokenizer)
     _fix_added_tokens_encoding(tokenizer)
     attach_additional_stop_token_ids(tokenizer)
+    _validate_tokenizer_backend(tokenizer, tokenizer_backend)
     return processor

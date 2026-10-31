@@ -16,6 +16,7 @@
 import importlib
 import json
 import logging
+import sys
 import warnings
 from pathlib import Path
 from typing import Optional, Union
@@ -461,6 +462,20 @@ _patched_backends = set()
 
 def _ensure_backend_patched(backend: str):
     """Monkey-patch transformers to use `backend` for tokenization (once)."""
+    if backend not in {"huggingface", *_PATCHING_BACKENDS}:
+        raise ValueError(f"Unknown tokenizer backend: {backend!r}")
+    deltatok = sys.modules.get("deltatok")
+    if deltatok is not None and deltatok._patched:
+        if backend != "deltatok" or deltatok._backend_mode != "off":
+            raise RuntimeError(
+                "transformers was already patched by deltatok with an incompatible "
+                "backend; start a fresh process."
+            )
+    if _patched_backends and backend not in _patched_backends:
+        raise RuntimeError(
+            "Tokenizer backend patches are process-global; start a fresh process "
+            f"to select {backend!r}."
+        )
     if backend not in _PATCHING_BACKENDS or backend in _patched_backends:
         return
     module_name, docs_url = _PATCHING_BACKENDS[backend]
@@ -473,9 +488,31 @@ def _ensure_backend_patched(backend: str):
             f"See {docs_url} for installation instructions."
         ) from None
 
-    module.patch_transformers()
+    if backend == "deltatok":
+        module.patch_transformers(backend="off")
+    else:
+        module.patch_transformers()
     _patched_backends.add(backend)
     logger.info("%s backend enabled - transformers patched successfully", backend)
+
+
+def _validate_tokenizer_backend(tokenizer, backend):
+    """Reject direct/custom loaders that bypass the requested native engine."""
+    if backend != "deltatok":
+        return
+    from deltatok._compat import _TokenizerShim
+    from deltatok._tiktoken_compat import _TiktokenEncodingShim
+
+    # Fast and remote-code slow tokenizers expose different engine attributes.
+    if isinstance(getattr(tokenizer, "_tokenizer", None), _TokenizerShim):
+        return
+    if isinstance(getattr(tokenizer, "model", None), _TiktokenEncodingShim):
+        return
+    raise ValueError(
+        "The loaded tokenizer does not use the native deltatok engine. "
+        "Start a fresh process with --tokenizer-backend=huggingface "
+        "for unsupported tokenizer implementations."
+    )
 
 
 def _ensure_fastokens_patched():
@@ -493,13 +530,17 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    _ensure_backend_patched(tokenizer_backend)
+
     # Tiktoken format has its own backend — no patching needed.
     if tokenizer_name.endswith(".json"):
+        if tokenizer_backend == "deltatok":
+            raise ValueError(
+                "deltatok does not support the standalone tiktoken JSON loader"
+            )
         from sglang.srt.tokenizer.tiktoken_tokenizer import TiktokenTokenizer
 
         return TiktokenTokenizer(tokenizer_name)
-
-    _ensure_backend_patched(tokenizer_backend)
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
@@ -517,6 +558,10 @@ def get_tokenizer(
         and gguf_sidecar_dir(tokenizer_name, "tokenizer_config.json") is None
         and has_native_gguf_support(tokenizer_name)
     ):
+        if tokenizer_backend == "deltatok":
+            raise ValueError(
+                "deltatok does not support the native GGUF tokenizer loader"
+            )
         _ensure_gguf_version()
         tokenizer = build_gguf_tokenizer(tokenizer_name)
         _fix_special_tokens_pattern(tokenizer)
@@ -534,6 +579,10 @@ def get_tokenizer(
 
     try:
         if is_bare_tekken_checkpoint(tokenizer_name, tokenizer_revision):
+            if tokenizer_backend == "deltatok":
+                raise ValueError(
+                    "deltatok does not support the bare tekken tokenizer loader"
+                )
             from transformers.tokenization_mistral_common import (
                 MistralCommonTokenizer,
             )
@@ -566,7 +615,11 @@ def get_tokenizer(
                     tokenizer_name, *args, **common_kwargs
                 )
 
-        return _apply_post_load_fixes(tokenizer, tokenizer_name, tokenizer_revision)
+        tokenizer = _apply_post_load_fixes(
+            tokenizer, tokenizer_name, tokenizer_revision
+        )
+        _validate_tokenizer_backend(tokenizer, tokenizer_backend)
+        return tokenizer
     except Exception as e:
         if tokenizer_backend in _PATCHING_BACKENDS:
             module_name, docs_url = _PATCHING_BACKENDS[tokenizer_backend]

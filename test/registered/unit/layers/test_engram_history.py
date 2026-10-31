@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from sglang.kernels.ops.embeddings.engram_hash import MODE_EXTEND
-from sglang.srt.layers.engram import EngramHasher
+from sglang.srt.layers.engram import EngramHasher, build_compressed_token_map
 from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_executor.model_runner_components.ngram_embedding_manager import (
@@ -37,6 +37,29 @@ def _make_manager():
     hasher.offsets = torch.zeros(1, 4, dtype=torch.int64)
     hasher.init_history(num_req_slots=2, device="cpu")
     return NgramEmbeddingManager(enabled=False, table=None, n=0, engram_hasher=hasher)
+
+
+class TestEngramTokenMap(unittest.TestCase):
+    def test_map_uses_hf_snapshot_when_serving_engine_cannot_decode_tokens(self):
+        """Serving encode engines need not implement the per-token decode API."""
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(models.BPE({"a": 0, "A": 1, "Ġ": 2, "Ã": 3, "©": 4}, []))
+        raw.decoder = decoders.ByteLevel()
+
+        class WrappedTokenizer:
+            def __init__(self, backend):
+                self.backend_tokenizer = backend
+
+            def __len__(self):
+                return raw.get_vocab_size()
+
+        snapshot_only = SimpleNamespace(to_str=raw.to_str)
+        expected = build_compressed_token_map(WrappedTokenizer(raw))
+        actual = build_compressed_token_map(WrappedTokenizer(snapshot_only))
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual[0][0], actual[0][1])
+        self.assertNotEqual(actual[0][3], actual[0][4])
 
 
 class TestEngramHistoryMultimodalPads(CustomTestCase):

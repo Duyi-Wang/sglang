@@ -132,7 +132,7 @@ def _find_next_prime(start: int, seen_primes: set[int]) -> int:
 def build_compressed_token_map(tokenizer) -> tuple[list[int], int]:
     """Token id -> compressed id, plus the compressed vocab size. The size feeds every
     hash multiplier, so a mismatch rehashes the whole table."""
-    from tokenizers import Regex, normalizers
+    from tokenizers import Regex, Tokenizer, normalizers
 
     # A private-use sentinel keeps a lone-space token from collapsing to "" under Strip().
     sentinel = "\ue000"
@@ -148,7 +148,8 @@ def build_compressed_token_map(tokenizer) -> tuple[list[int], int]:
             normalizers.Replace(sentinel, " "),
         ]
     )
-    backend = tokenizer.backend_tokenizer
+    # Build the table with HF decoding even when serving uses another engine.
+    backend = Tokenizer.from_str(tokenizer.backend_tokenizer.to_str())
     key_to_new: dict[str, int] = {}
     lookup = [0] * len(tokenizer)
     for token_id in range(len(tokenizer)):
@@ -315,14 +316,13 @@ class EngramHasher(nn.Module):
     def from_config(
         cls, config, layout: EngramLayout, *, image_token_id: Optional[int] = None
     ) -> EngramHasher:
-        # The compressed token map is built with the HF normalizers, so the HF
-        # tokenizer backend is used here whatever the serving backend is.
+        # The map builder restores HF decoding from the resolved tokenizer JSON.
         tokenizer = get_tokenizer(
             get_serving().tokenizer_path,
             tokenizer_mode=get_serving().tokenizer_mode,
             trust_remote_code=get_model().trust_remote_code,
             revision=get_model().revision,
-            tokenizer_backend="huggingface",
+            tokenizer_backend=get_serving().tokenizer_backend,
         )
         result = cls(
             layout,
