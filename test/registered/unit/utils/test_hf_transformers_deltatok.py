@@ -94,6 +94,37 @@ class TestDeltatokDispatch(unittest.TestCase):
         ):
             self.loader._ensure_backend_patched("huggingface")
 
+    def test_revision_is_preserved_for_loading_and_post_load_fixes(self):
+        for kwargs, expected in (
+            ({"tokenizer_revision": "pinned"}, "pinned"),
+            ({"revision": "explicit"}, "explicit"),
+            ({"tokenizer_revision": "pinned", "revision": "explicit"}, "explicit"),
+        ):
+            tokenizer = SimpleNamespace()
+            with (
+                self.subTest(kwargs=kwargs),
+                patch.object(self.loader, "_ensure_backend_patched"),
+                patch.object(self.loader, "check_gguf_file", return_value=False),
+                patch.object(
+                    self.loader, "_resolve_tokenizer_name", return_value="model"
+                ),
+                patch.object(
+                    self.loader, "is_bare_tekken_checkpoint", return_value=False
+                ),
+                patch.object(
+                    self.loader,
+                    "_auto_tokenizer_from_pretrained",
+                    return_value=tokenizer,
+                ) as load,
+                patch.object(
+                    self.loader, "_apply_post_load_fixes", return_value=tokenizer
+                ) as fix,
+            ):
+                self.loader.get_tokenizer("model", **kwargs)
+                self.assertEqual(load.call_args.kwargs["revision"], expected)
+                self.assertNotIn("tokenizer_revision", load.call_args.kwargs)
+                fix.assert_called_once_with(tokenizer, "model", expected)
+
     def test_unknown_backend_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown tokenizer backend"):
             self.loader._ensure_backend_patched("unknown")

@@ -531,6 +531,7 @@ def get_tokenizer(
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
     _ensure_backend_patched(tokenizer_backend)
+    tokenizer_revision = kwargs.pop("revision", tokenizer_revision)
 
     # Tiktoken format has its own backend — no patching needed.
     if tokenizer_name.endswith(".json"):
@@ -572,7 +573,7 @@ def get_tokenizer(
 
     common_kwargs = dict(
         trust_remote_code=trust_remote_code,
-        tokenizer_revision=tokenizer_revision,
+        revision=tokenizer_revision,
         clean_up_tokenization_spaces=False,
         **kwargs,
     )

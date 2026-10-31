@@ -126,7 +126,7 @@ Please consult the documentation below and [server_args.py](https://github.com/s
     </tr>
         <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--tokenizer-backend`</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Install <code>deltatok</code> for native encoding with strict rejection of unsupported tokenizers; the environment cannot enable fallback. Restart to switch process-global backends. Engram builds its token map with HF decoding from the resolved tokenizer snapshot. <code>huggingface</code> uses HuggingFace; <code>fastokens</code> requires its package.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Install <code>deltatok</code> for native encoding with strict rejection of unsupported tokenizers; the environment cannot enable fallback. Loading and post-load fixes share the resolved revision. Restart to switch process-global backends. Engram builds its token map with HF decoding from the resolved tokenizer snapshot. <code>huggingface</code> uses HuggingFace; <code>fastokens</code> requires its package.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`deltatok`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>huggingface</code>, <code>fastokens</code>, <code>deltatok</code></td>
     </tr>
